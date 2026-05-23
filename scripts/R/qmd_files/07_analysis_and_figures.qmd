@@ -1,0 +1,1302 @@
+---
+title: "07_analysis_and_figures"
+format: pdf
+editor: visual
+editor_options:
+  chunk_output_type: console
+---
+
+All analysis and figure generation for the study. Outputs are saved to `results/main_figures/`, `results/supplemental_figures/`, and `results/supplemental_tables/`.
+
+------------------------------------------------------------------------
+
+# Load Seurat objects
+
+```{r}
+lc_seu <- readRDS(here::here("data/processed/low_complexity/seurat_object/lc_seu.Rds"))
+hc_seu <- readRDS(here::here("data/processed/high_complexity/seurat_object/hc_seu.Rds"))
+gen_seu <- readRDS(here::here("data/processed/genotype/seurat_object/gen_seu.Rds"))
+smart_seu <- readRDS(here::here("data/processed/smart-seq2/seurat_object/smart_seu.Rds"))
+synt_seu <- readRDS(here::here("data/processed/synthetic/seurat_object/synt_seu.Rds"))
+synt_wo_ambient_seu <- readRDS(here::here("data/processed/synthetic/seurat_object/synt_seu_wo_ambient.Rds"))
+
+# Medium complexity: subset to spike-in cells of the opposite species and
+# remove samples with < 10 cells after subsetting
+mc_human_seu <- readRDS(here::here("data/processed/medium_complexity/seurat_object/mc_human_seu.Rds"))
+mc_human_seu <- subset(mc_human_seu, subset = origin == "mouse")
+mc_human_seu <- subset(mc_human_seu, subset = !(orig.ident %in% names(table(mc_human_seu$orig.ident)[table(mc_human_seu$orig.ident) < 10])))
+# Removed: SRR10751485, SRR10751486, SRR10751492, SRR10751494, SRR10751496
+mc_human_samples <- mc_human_samples[!mc_human_samples %in% c("SRR10751485", "SRR10751486", "SRR10751492", "SRR10751494", "SRR10751496")]
+saveRDS(mc_human_seu, here::here("data/processed/medium_complexity/seurat_object/mc_human_seu_subset.Rds"))
+
+mc_mouse_seu <- readRDS(here::here("data/processed/medium_complexity/seurat_object/mc_mouse_seu.Rds"))
+mc_mouse_seu <- subset(mc_mouse_seu, subset = origin == "human")
+mc_mouse_seu <- subset(mc_mouse_seu, subset = !(orig.ident %in% names(table(mc_mouse_seu$orig.ident)[table(mc_mouse_seu$orig.ident) < 10])))
+# Removed: SRR10751508, SRR10751514
+mc_mouse_samples <- mc_mouse_samples[!mc_mouse_samples %in% c("SRR10751508", "SRR10751514")]
+saveRDS(mc_mouse_seu, here::here("data/processed/medium_complexity/seurat_object/mc_mouse_seu_subset.Rds"))
+```
+
+------------------------------------------------------------------------
+
+# Characterising ambient RNA
+
+Ambient characterisation is performed for all droplet-based datasets (low, medium, high complexity, and genotype). Smart-seq2 and synthetic datasets are excluded as they lack a meaningful empty droplet pool.
+
+## Divide counts into ambient and endogenous compartments
+
+### Low complexity
+
+The low complexity dataset is a barnyard experiment and can be evaluated in both directions: mouse genes contaminating human cells, and vice versa.
+
+```{r}
+# Human cells contaminated by mouse genes
+lc_raw_human <- extract_raw_counts(seu = lc_seu, origin = "human")
+lc_raw_human_ambient <- extract_ambient_counts(lc_raw_human,    ambient_pattern    = "^mm10-")
+lc_raw_human_endogenous <- extract_endogenous_counts(lc_raw_human, endogenous_pattern = "^GRCh38-")
+
+# Mouse cells contaminated by human genes
+lc_raw_mouse <- extract_raw_counts(seu = lc_seu, origin = "mouse")
+lc_raw_mouse_ambient <- extract_ambient_counts(lc_raw_mouse,    ambient_pattern    = "^GRCh38-")
+lc_raw_mouse_endogenous <- extract_endogenous_counts(lc_raw_mouse, endogenous_pattern = "^mm10-")
+```
+
+### Medium complexity
+
+Only spike-in cells (cells of the opposite species from the sample) are used to evaluate decontamination.
+
+```{r}
+# Human samples: mouse spike-in cells carry ambient human (GRCh38) signal
+mc_raw_human <- extract_raw_counts(seu = mc_human_seu, origin = "mouse")
+mc_raw_human_ambient <- extract_ambient_counts(mc_raw_human, ambient_pattern = "^GRCh38-")
+mc_raw_human_endogenous <- extract_endogenous_counts(mc_raw_human, endogenous_pattern = "^mm10-")
+
+mc_raw_human_not_spikein <- extract_raw_counts(seu = mc_human_seu, origin = "human")
+mc_raw_human_ambient_not_spikein <- extract_ambient_counts(mc_raw_human_not_spikein, ambient_pattern = "^mm10-")
+mc_raw_human_endogenous_not_spikein <- extract_endogenous_counts(mc_raw_human_not_spikein, endogenous_pattern = "^GRCh38-")
+
+# Mouse samples: human spike-in cells carry ambient mouse (mm10) signal
+mc_raw_mouse <- extract_raw_counts(seu = mc_mouse_seu, origin = "human")
+mc_raw_mouse_ambient <- extract_ambient_counts(mc_raw_mouse, ambient_pattern = "^mm10-")
+mc_raw_mouse_endogenous <- extract_endogenous_counts(mc_raw_mouse, endogenous_pattern = "^GRCh38-")
+
+mc_raw_mouse_not_spikein <- extract_raw_counts(seu = mc_mouse_seu, origin = "mouse")
+mc_raw_mouse_ambient_not_spikein <- extract_ambient_counts(mc_raw_mouse_not_spikein,  ambient_pattern = "^GRCh38-")
+mc_raw_mouse_endogenous_not_spikein <- extract_endogenous_counts(mc_raw_mouse_not_spikein, endogenous_pattern = "^mm10-")
+```
+
+### High complexity
+
+```{r}
+hc_raw_human <- extract_raw_counts(seu = hc_seu, origin = "human")
+hc_raw_human_ambient <- extract_ambient_counts(hc_raw_human, ambient_pattern = "^mm10-")
+hc_raw_human_endogenous <- extract_endogenous_counts(hc_raw_human, endogenous_pattern = "^GRCh38-")
+
+hc_raw_mouse <- extract_raw_counts(seu = hc_seu, origin = "mouse")
+hc_raw_mouse_ambient <- extract_ambient_counts(hc_raw_mouse, ambient_pattern = "^GRCh38-")
+hc_raw_mouse_endogenous <- extract_endogenous_counts(hc_raw_mouse, endogenous_pattern = "^mm10-")
+```
+
+### Genotype
+
+For the genotype dataset, ambient fractions are estimated from SNP data using `calc_ambient_from_SNPs()` (defined in `02_functions.qmd`). The genotype_estimation folder comes from the study from which the dataset was retrieved.
+
+Each SNP position is also classified as exonic using a BED intersection (see `03_download_datasets.qmd` for the exon BED file preparation).
+
+```{r}
+# Calculate ambient fractions per gene per cell from SNP calls
+csc_all <- dplyr::bind_rows(lapply(gen_samples, calc_ambient_from_SNPs))
+```
+
+```{r}
+# Classify SNP positions as exonic or intronic
+exonic <- read.table(
+  here::here("data/raw/reference_sources/refdata-gex-GRCm39-2024-A/genes/variants_in_exons.bed"),
+  header = FALSE
+) |>
+  setNames(c("chr", "start", "end")) |>
+  dplyr::mutate(pos = start + 1) |>
+  dplyr::select(chr, pos)
+
+csc_all <- csc_all |>
+  tidyr::separate(Position, into = c("chr", "pos"), convert = TRUE) |>
+  dplyr::mutate(
+    chr       = paste0("chr", chr),
+    is_exonic = (chr %in% exonic$chr & pos %in% exonic$pos)
+  )
+
+saveRDS(csc_all, here::here("data/processed/genotype/genotype_estimation/all/csc_all_with_exon_information.Rds"))
+```
+
+```{r}
+# Build ambient and endogenous matrices from SNP-derived fractions
+gen_raw_counts <- as.matrix(gen_seu@assays$RNA$counts)
+gen_raw_ambient <- matrix(NA, nrow = nrow(gen_raw_counts), ncol = ncol(gen_raw_counts), dimnames = dimnames(gen_raw_counts))
+
+csc_filt <- csc_all[csc_all$Symbol %in% rownames(gen_raw_ambient) & csc_all$Barcode %in% colnames(gen_raw_ambient), ]
+
+row_idx <- match(csc_filt$Symbol, rownames(gen_raw_ambient))
+col_idx <- match(csc_filt$Barcode, colnames(gen_raw_ambient))
+gen_raw_ambient[cbind(row_idx, col_idx)] <- gen_raw_counts[cbind(row_idx, col_idx)] * csc_filt$Ambient
+
+gen_raw_endogenous <- as.matrix(gen_raw_counts - gen_raw_ambient)
+```
+
+------------------------------------------------------------------------
+
+## Ambient load per cell
+
+### Low complexity
+
+```{r}
+lc_ambient_load_percentages <- calc_ambient_load_percentages(
+  ambient_list = list(human = lc_raw_human_ambient, mouse = lc_raw_mouse_ambient),
+  raw_list = list(human = lc_raw_human, mouse = lc_raw_mouse)
+)
+
+lc_avg_ambient_load_percentage <- calc_avg_ambient_load_percentage(lc_ambient_load_percentages)
+
+lc_amb_pct_hist <- make_histogram_of_ambient_load(
+  ambient_load = lc_ambient_load_percentages,
+  avg_ambient_load = lc_avg_ambient_load_percentage
+)
+saveRDS(lc_amb_pct_hist, here::here("results/main_figures/figure_2/lc_amb_pct_hist.rds"))
+```
+
+### Medium complexity — human samples
+
+```{r}
+mc_human_samples_current <- unique(mc_human_seu$orig.ident)
+mc_ambient_load_percentages_human <- calc_ambient_load_percentages(
+  ambient_list = list(human = mc_raw_human_ambient),
+  raw_list = list(human = mc_raw_human),
+  seu = mc_human_seu,
+  samples = mc_human_samples_current
+)
+colnames(mc_ambient_load_percentages_human)[5] <- "value"
+
+mc_avg_ambient_load_human <- calc_avg_ambient_load_percentage(mc_ambient_load_percentages_human)
+mc_avg_ambient_load_human$group <- factor(mc_avg_ambient_load_human$group,
+                                           levels = rev(paste0("S", seq_len(14))))
+```
+
+### Medium complexity — mouse samples
+
+```{r}
+mc_mouse_samples_current <- unique(mc_mouse_seu$orig.ident)
+mc_ambient_load_percentages_mouse <- calc_ambient_load_percentages(
+  ambient_list = list(mouse = mc_raw_mouse_ambient),
+  raw_list = list(mouse = mc_raw_mouse),
+  seu = mc_mouse_seu,
+  samples = mc_mouse_samples_current
+)
+colnames(mc_ambient_load_percentages_mouse)[5] <- "value"
+
+mc_avg_ambient_load_mouse <- calc_avg_ambient_load_percentage(mc_ambient_load_percentages_mouse)
+mc_avg_ambient_load_mouse$group <- factor(mc_avg_ambient_load_mouse$group,
+                                           levels = rev(paste0("S", seq_len(13))))
+```
+
+### Medium complexity — combined plot
+
+```{r}
+mc_ambient_load_percentages_combined <- rbind(
+  mc_ambient_load_percentages_human,
+  mc_ambient_load_percentages_mouse
+)
+mc_avg_ambient_load_combined <- rbind(mc_avg_ambient_load_human, mc_avg_ambient_load_mouse)
+mc_ambient_load_percentages_combined$group <- factor(
+  mc_ambient_load_percentages_combined$group, levels = rev(paste0("S", seq_len(27)))
+)
+
+mc_amb_pct_ridge <- ambient_load_ridge_plot(
+  ambient_load = mc_ambient_load_percentages_combined,
+  avg_ambient_load = mc_avg_ambient_load_combined
+)
+saveRDS(mc_amb_pct_ridge, here::here("results/main_figures/figure_2/mc_amb_pct_ridge.rds"))
+```
+
+### High complexity
+
+```{r}
+hc_ambient_load_percentages <- calc_ambient_load_percentages(
+  ambient_list = list(human = hc_raw_human_ambient, mouse = hc_raw_mouse_ambient),
+  raw_list = list(human = hc_raw_human,         mouse = hc_raw_mouse),
+  seu = hc_seu,
+  samples = hc_samples
+)
+hc_avg_ambient_load <- calc_avg_ambient_load_percentage(hc_ambient_load_percentages)
+
+hc_ambient_load_percentages$group <- factor(hc_ambient_load_percentages$group, levels = rev(paste0("S", seq_len(16))))
+hc_amb_pct_ridge <- ambient_load_ridge_plot(hc_ambient_load_percentages, hc_avg_ambient_load)
+saveRDS(hc_amb_pct_ridge, here::here("results/main_figures/figure_2/hc_amb_pct_ridge.rds"))
+```
+
+### Genotype
+
+```{r}
+gen_ambient_load_percentages <- calc_ambient_load_percentages(
+  ambient_list = list(CAST = gen_raw_ambient),
+  raw_list = list(CAST = gen_raw_counts),
+  seu = gen_seu,
+  samples = gen_samples
+)
+gen_avg_ambient_load <- calc_avg_ambient_load_percentage(gen_ambient_load_percentages)
+
+gen_ambient_load_percentages$group <- factor(gen_ambient_load_percentages$group, levels = rev(paste0("S", seq_len(5))))
+gen_amb_pct_ridge <- ambient_load_ridge_plot(gen_ambient_load_percentages, gen_avg_ambient_load)
+saveRDS(gen_amb_pct_ridge, here::here("results/main_figures/figure_2/gen_amb_pct_ridge.rds"))
+```
+
+### Summary statistics: QCD and strongly affected barcodes
+
+```{r}
+# Combine all datasets
+ambient_load_all_datasets <- dplyr::bind_rows(
+  dplyr::mutate(lc_ambient_load_percentages, dataset = "low_complexity"),
+  dplyr::mutate(mc_ambient_load_percentages_combined, dataset = "medium_complexity"),
+  dplyr::mutate(hc_ambient_load_percentages, dataset = "high_complexity"),
+  dplyr::mutate(gen_ambient_load_percentages, dataset = "genotype")
+)
+write_xlsx(ambient_load_all_datasets, path = here::here("results/supplemental_tables/ambient_load_per_cell.xlsx"))
+
+# QCD within samples
+qcd_within_samples <- ambient_load_all_datasets |>
+  dplyr::group_by(dataset, sample) |>
+  dplyr::summarise(QCD_within_sample = calc_qcd(ambient_percent), .groups = "drop")
+mean(qcd_within_samples$QCD_within_sample)
+
+# QCD between samples within a study
+sample_means <- ambient_load_all_datasets |>
+  dplyr::group_by(dataset, sample) |>
+  dplyr::summarise(mean_value = mean(ambient_percent), .groups = "drop")
+
+qcd_between_samples <- sample_means |>
+  dplyr::group_by(dataset) |>
+  dplyr::summarise(QCD_between_samples = if (dplyr::n() > 1) calc_qcd(mean_value) else NA_real_)
+mean(qcd_between_samples$QCD_between_samples, na.rm = TRUE)
+
+# QCD between studies
+study_means <- sample_means |>
+  dplyr::group_by(dataset) |>
+  dplyr::summarise(study_mean = mean(mean_value), .groups = "drop")
+calc_qcd(study_means$study_mean)
+
+# Fraction of top-10%-UMI cells with > 10% ambient contamination
+umi_cutoff <- quantile(ambient_load_all_datasets$total_umis, 0.9, na.rm = TRUE)
+top10_cells <- dplyr::filter(ambient_load_all_datasets, total_umis >= umi_cutoff)
+mean(top10_cells$ambient_percent >= 10, na.rm = TRUE) * 100
+```
+
+------------------------------------------------------------------------
+
+## Variation explained by cellular parameters
+
+Exon fraction, mitochondrial fraction, protein-coding fraction, and ribosomal fraction are used as covariates to explain variation in ambient RNA load.
+
+### Exon fractions
+
+#### Low complexity
+
+```{r}
+lc_exon_fraction <- calc_exon_fraction(
+  path = here::here("data/raw/low_complexity/FastQ/exon_intron/Solo.out"),
+  object = lc_seu,
+  name = "Barnyard"
+)
+lc_exon_fraction_per_feature <- lc_exon_fraction$features
+lc_exon_fraction_per_cell <- lc_exon_fraction$cells
+```
+
+#### Medium complexity — human samples
+
+```{r}
+mc_exon_list_human <- list()
+for (samp in mc_human_samples) {
+  mc_exon_list_human[[samp]] <- calc_exon_fraction(
+    path   = here::here(paste0("data/raw/medium_complexity/", samp, "_STARsolo_Alignment/", samp, "_Solo.out/")),
+    object = mc_human_seu,
+    name = samp,
+    paste1 = FALSE
+  )
+}
+mc_exon_fraction_per_feature_human <- unlist(lapply(mc_exon_list_human, `[[`, "features"))
+mc_exon_fraction_per_cell_human <- unlist(lapply(mc_exon_list_human, `[[`, "cells"))
+```
+
+#### Medium complexity — mouse samples
+
+```{r}
+mc_exon_list_mouse <- list()
+for (samp in mc_mouse_samples) {
+  mc_exon_list_mouse[[samp]] <- calc_exon_fraction(
+    path   = here::here(paste0("data/raw/medium_complexity/", samp, "_STARsolo_Alignment/", samp, "_Solo.out/")),
+    object = mc_mouse_seu,
+    name = samp,
+    paste1 = FALSE
+  )
+}
+mc_exon_fraction_per_feature_mouse <- unlist(lapply(mc_exon_list_mouse, `[[`, "features"))
+mc_exon_fraction_per_cell_mouse <- unlist(lapply(mc_exon_list_mouse, `[[`, "cells"))
+
+mc_exon_fraction_per_feature_combined <- c(mc_exon_fraction_per_feature_human, mc_exon_fraction_per_feature_mouse)
+mc_exon_fraction_per_cell_combined <- c(mc_exon_fraction_per_cell_human,    mc_exon_fraction_per_cell_mouse)
+```
+
+#### High complexity
+
+```{r}
+hc_exon_list <- list()
+for (samp in hc_samples) {
+  hc_exon_list[[samp]] <- calc_exon_fraction(
+    path = here::here(paste0("data/raw/high_complexity/", samp, "_STARsolo_Alignment/", samp, "_Solo.out/")),
+    object = hc_seu,
+    name = samp,
+    paste1 = FALSE
+  )
+}
+hc_exon_fraction_per_feature <- unlist(lapply(hc_exon_list, `[[`, "features"))
+hc_exon_fraction_per_cell <- unlist(lapply(hc_exon_list, `[[`, "cells"))
+```
+
+#### Genotype
+
+Exon fraction is derived from the SNP call data rather than STARsolo.
+
+```{r}
+csc_exons <- csc_all[csc_all$is_exonic == TRUE, ]
+
+gen_raw_exon <- matrix(NA, nrow = nrow(gen_raw_counts), ncol = ncol(gen_raw_counts),
+                        dimnames = dimnames(gen_raw_counts))
+row_idx <- match(csc_exons$Symbol,  rownames(gen_raw_counts))
+col_idx <- match(csc_exons$Barcode, colnames(gen_raw_counts))
+gen_raw_exon[cbind(row_idx, col_idx)] <- gen_raw_counts[cbind(row_idx, col_idx)]
+
+gen_exon_fraction_per_cell <- colSums(gen_raw_exon, na.rm = TRUE) / colSums(gen_raw_counts, na.rm = TRUE)
+gen_exon_fraction_per_feature <- rowSums(gen_raw_exon, na.rm = TRUE) / rowSums(gen_raw_counts, na.rm = TRUE)
+```
+
+### Ambient load vs exon fraction
+
+```{r}
+# Low complexity
+lc_amb_load_vs_exon_fraction <- match_ambient_load_with_exon_fractions(
+  exon_fraction_per_feature = lc_exon_fraction_per_feature,
+  raw_human_ambient = lc_raw_human_ambient,
+  raw_mouse_ambient = lc_raw_mouse_ambient
+)
+lc_amb_load_vs_exon_frac <- make_scatterplot_of_amb_load_vs_exon_fraction(lc_amb_load_vs_exon_fraction)
+saveRDS(lc_amb_load_vs_exon_frac, here::here("results/supplemental_figures/supp_fig_2/lc_amb_load_vs_exon_frac.rds"))
+lc_amb_load_vs_exon_fraction$dataset <- "low_complexity"
+write_xlsx(lc_amb_load_vs_exon_fraction, path = here::here("results/supplemental_tables/lc_ambient_load_vs_exon_fraction.xlsx"))
+
+# Medium complexity (uses the species-aware matching function)
+mc_amb_load_vs_exon_fraction <- match_ambient_load_with_exon_fractions_mc(
+  exon_fraction_per_feature_1 = mc_exon_fraction_per_feature_human,
+  exon_fraction_per_feature_2 = mc_exon_fraction_per_feature_mouse,
+  raw_human_ambient = mc_raw_human_ambient,
+  raw_mouse_ambient = mc_raw_mouse_ambient
+)
+mc_amb_load_vs_exon_frac <- make_scatterplot_of_amb_load_vs_exon_fraction(mc_amb_load_vs_exon_fraction)
+saveRDS(mc_amb_load_vs_exon_frac, here::here("results/supplemental_figures/supp_fig_2/mc_amb_load_vs_exon_frac.rds"))
+mc_amb_load_vs_exon_fraction$dataset <- "medium_complexity"
+write_xlsx(mc_amb_load_vs_exon_fraction, path = here::here("results/supplemental_tables/mc_ambient_load_vs_exon_fraction.xlsx"))
+
+# High complexity
+hc_amb_load_vs_exon_fraction <- match_ambient_load_with_exon_fractions(
+  exon_fraction_per_feature = hc_exon_fraction_per_feature,
+  raw_human_ambient = hc_raw_human_ambient,
+  raw_mouse_ambient = hc_raw_mouse_ambient
+)
+hc_amb_load_vs_exon_frac <- make_scatterplot_of_amb_load_vs_exon_fraction(hc_amb_load_vs_exon_fraction)
+saveRDS(hc_amb_load_vs_exon_frac, here::here("results/supplemental_figures/supp_fig_2/hc_amb_load_vs_exon_frac.rds"))
+hc_amb_load_vs_exon_fraction$dataset <- "high_complexity"
+write_xlsx(hc_amb_load_vs_exon_fraction, path = here::here("results/supplemental_tables/hc_ambient_load_vs_exon_fraction.xlsx"))
+
+# Genotype
+gen_ambient_load_vs_exon_fraction <- data.frame(
+  exon_fraction = gen_exon_fraction_per_feature,
+  log_ambient_expression = log1p(rowSums(gen_raw_ambient, na.rm = TRUE))
+)
+gen_amb_load_vs_exon_frac <- make_scatterplot_of_amb_load_vs_exon_fraction(gen_ambient_load_vs_exon_fraction)
+saveRDS(gen_amb_load_vs_exon_frac, here::here("results/supplemental_figures/supp_fig_2/gen_amb_load_vs_exon_frac.rds"))
+gen_ambient_load_vs_exon_fraction$dataset <- "genotype"
+write_xlsx(gen_ambient_load_vs_exon_fraction, path = here::here("results/supplemental_tables/gen_ambient_load_vs_exon_fraction.xlsx"))
+
+rm(lc_amb_load_vs_exon_frac, mc_amb_load_vs_exon_frac, hc_amb_load_vs_exon_frac, gen_amb_load_vs_exon_frac)
+```
+
+#### Summary: percentage of ambient UMIs from top-10%-exon-fraction genes
+
+```{r}
+for (ds in c("lc", "mc", "hc", "gen")) {
+  df_name  <- paste0(ds, if (ds == "gen") "_ambient_load_vs_exon_fraction" else "_amb_load_vs_exon_fraction")
+  df <- get(df_name)
+
+  threshold <- quantile(df$exon_fraction, 0.90, na.rm = TRUE)
+  top10 <- df[!is.na(df$exon_fraction) & df$exon_fraction >= threshold, ]
+  above90 <- df[!is.na(df$exon_fraction) & df$exon_fraction > 0.9, ]
+
+  pct_top10 <- sum(expm1(top10$log_ambient_expression),  na.rm = TRUE) /
+                sum(expm1(df$log_ambient_expression),     na.rm = TRUE) * 100
+  pct_above90 <- sum(expm1(above90$log_ambient_expression), na.rm = TRUE) /
+                 sum(expm1(df$log_ambient_expression),      na.rm = TRUE) * 100
+
+  message(ds, " — % ambient from top-10% exon fraction genes: ", round(pct_top10, 1))
+  message(ds, " — % ambient from genes with exon fraction > 0.9: ", round(pct_above90, 1))
+}
+```
+
+### Gene biotypes
+
+```{r}
+# Low complexity
+lc_gene_info <- get_gene_biotypes(
+  path = here::here("data/raw/low_complexity/FastQ/GRCh38_and_mm10-2020-A_build/reference/geneInfo.tab"),
+  seu  = lc_seu
+)
+lc_pc_fraction_per_cell <- calc_fraction_pc_genes_per_cell(lc_seu, lc_gene_info)
+lc_ribo_fraction_per_cell <- calc_fraction_ribo_genes_per_cell(lc_seu)
+lc_mt_fraction_per_cell <- lc_seu$fraction.mt
+
+# Medium complexity — human
+mc_gene_info_human <- get_gene_biotypes(
+  path = here::here("data/raw/medium_complexity/FastQ/GRCh38-and-mm10-2020-A-10X-Download/star/geneInfo.tab"),
+  seu  = mc_human_seu
+)
+mc_pc_fraction_per_cell_human <- calc_fraction_pc_genes_per_cell(mc_human_seu, mc_gene_info_human)
+mc_ribo_fraction_per_cell_human <- calc_fraction_ribo_genes_per_cell(mc_human_seu)
+mc_mt_fraction_per_cell_human <- mc_human_seu$fraction.mt
+
+# Medium complexity — mouse
+mc_gene_info_mouse <- get_gene_biotypes(
+  path = here::here("data/raw/medium_complexity/FastQ/GRCh38-and-mm10-2020-A-10X-Download/star/geneInfo.tab"),
+  seu  = mc_mouse_seu
+)
+mc_pc_fraction_per_cell_mouse <- calc_fraction_pc_genes_per_cell(mc_mouse_seu, mc_gene_info_mouse)
+mc_ribo_fraction_per_cell_mouse <- calc_fraction_ribo_genes_per_cell(mc_mouse_seu)
+mc_mt_fraction_per_cell_mouse <- mc_mouse_seu$fraction.mt
+
+mc_pc_fraction_per_cell_combined <- c(mc_pc_fraction_per_cell_human,   mc_pc_fraction_per_cell_mouse)
+mc_ribo_fraction_per_cell_combined <- c(mc_ribo_fraction_per_cell_human, mc_ribo_fraction_per_cell_mouse)
+mc_mt_fraction_per_cell_combined <- c(mc_mt_fraction_per_cell_human,   mc_mt_fraction_per_cell_mouse)
+
+# High complexity
+hc_gene_info <- get_gene_biotypes(
+  path = here::here("data/raw/reference_sources/GRCh38-and-mm10-2020-A-10X-Download/star/geneInfo.tab"),
+  seu  = hc_seu
+)
+hc_pc_fraction_per_cell <- calc_fraction_pc_genes_per_cell(hc_seu, hc_gene_info)
+hc_ribo_fraction_per_cell <- calc_fraction_ribo_genes_per_cell(hc_seu)
+hc_mt_fraction_per_cell <- hc_seu$fraction.mt
+
+# Genotype
+gen_gene_info <- get_gene_biotypes(
+  path = here::here("data/raw/reference_sources/refdata-gex-GRCm39-2024-A/star/geneInfo.tab"),
+  seu  = gen_seu
+)
+gen_pc_fraction_per_cell <- calc_fraction_pc_genes_per_cell(gen_seu, gen_gene_info)
+gen_ribo_fraction_per_cell <- calc_fraction_ribo_genes_per_cell(gen_seu)
+gen_mt_fraction_per_cell <- gen_seu$fraction.mt
+```
+
+### Variance explained by cellular parameters
+
+```{r}
+# Helper: match ambient load fractions with a gene biotype covariate
+make_biotype_df <- function(ambient_load_fractions, gene_biotype) {
+  match_ambient_load_with_gene_biotypes(
+    ambient_load_fractions = ambient_load_fractions,
+    gene_biotype = gene_biotype
+  )
+}
+
+# Low complexity
+lc_ambient_load_fractions <- calc_ambient_load_fractions(
+  raw_ambient_1 = lc_raw_mouse_ambient, raw_1 = lc_raw_mouse,
+  raw_ambient_2 = lc_raw_human_ambient, raw_2 = lc_raw_human
+)
+lc_var_expl_human <- calc_var_explained_by_cellular_params(
+  seu = lc_seu, species = "human",
+  ambient_fraction = lc_ambient_load_fractions,
+  ambient_exon_fraction_per_cell = make_biotype_df(lc_ambient_load_fractions, lc_exon_fraction_per_cell),
+  ambient_pc_fraction_per_cell = make_biotype_df(lc_ambient_load_fractions, lc_pc_fraction_per_cell),
+  ambient_ribo_fraction_per_cell = make_biotype_df(lc_ambient_load_fractions, lc_ribo_fraction_per_cell),
+  ambient_mt_fraction_per_cell = make_biotype_df(lc_ambient_load_fractions, lc_mt_fraction_per_cell),
+  raw_counts = lc_raw_human, ambient_counts = lc_raw_human_ambient, endogenous_counts = lc_raw_human_endogenous
+)
+lc_var_expl_mouse <- calc_var_explained_by_cellular_params(
+  seu = lc_seu, species = "mouse",
+  ambient_fraction = lc_ambient_load_fractions,
+  ambient_exon_fraction_per_cell = make_biotype_df(lc_ambient_load_fractions, lc_exon_fraction_per_cell),
+  ambient_pc_fraction_per_cell = make_biotype_df(lc_ambient_load_fractions, lc_pc_fraction_per_cell),
+  ambient_ribo_fraction_per_cell = make_biotype_df(lc_ambient_load_fractions, lc_ribo_fraction_per_cell),
+  ambient_mt_fraction_per_cell = make_biotype_df(lc_ambient_load_fractions, lc_mt_fraction_per_cell),
+  raw_counts = lc_raw_mouse, ambient_counts = lc_raw_mouse_ambient, endogenous_counts = lc_raw_mouse_endogenous
+)
+lc_var_explained <- data.frame(
+  parameters = lc_var_expl_human[[1]],
+  percent_explained = (lc_var_expl_human$percent_explained + lc_var_expl_mouse$percent_explained) / 2
+)
+lc_var_by_cellular_params <- make_barplot_of_explained_variance(lc_var_explained)
+saveRDS(lc_var_by_cellular_params, here::here("results/main_figures/figure_2/lc_var_by_celular_params.rds"))
+lc_var_explained$dataset <- "low_complexity"
+write_xlsx(lc_var_explained, path = here::here("results/supplemental_tables/lc_var_by_cellular_parameters.xlsx"))
+rm(lc_var_expl_human, lc_var_expl_mouse, lc_var_by_cellular_params)
+
+# Medium complexity
+mc_ambient_load_fractions_human <- calc_ambient_load_fractions(
+  raw_ambient_1 = mc_raw_human_ambient, raw_1 = mc_raw_human
+)
+mc_ambient_load_fractions_mouse <- calc_ambient_load_fractions(
+  raw_ambient_1 = mc_raw_mouse_ambient, raw_1 = mc_raw_mouse
+)
+mc_var_expl_human <- calc_var_explained_by_cellular_params(
+  seu = mc_human_seu, species = "mouse",
+  ambient_fraction = mc_ambient_load_fractions_human,
+  ambient_exon_fraction_per_cell = make_biotype_df(mc_ambient_load_fractions_human, mc_exon_fraction_per_cell_human),
+  ambient_pc_fraction_per_cell = make_biotype_df(mc_ambient_load_fractions_human, mc_pc_fraction_per_cell_human),
+  ambient_ribo_fraction_per_cell = make_biotype_df(mc_ambient_load_fractions_human, mc_ribo_fraction_per_cell_human),
+  ambient_mt_fraction_per_cell = make_biotype_df(mc_ambient_load_fractions_human, mc_mt_fraction_per_cell_human),
+  raw_counts = mc_raw_human, ambient_counts = mc_raw_human_ambient, endogenous_counts = mc_raw_human_endogenous
+)
+mc_var_expl_mouse <- calc_var_explained_by_cellular_params(
+  seu = mc_mouse_seu, species = "human",
+  ambient_fraction = mc_ambient_load_fractions_mouse,
+  ambient_exon_fraction_per_cell = make_biotype_df(mc_ambient_load_fractions_mouse, mc_exon_fraction_per_cell_mouse),
+  ambient_pc_fraction_per_cell = make_biotype_df(mc_ambient_load_fractions_mouse, mc_pc_fraction_per_cell_mouse),
+  ambient_ribo_fraction_per_cell = make_biotype_df(mc_ambient_load_fractions_mouse, mc_ribo_fraction_per_cell_mouse),
+  ambient_mt_fraction_per_cell = make_biotype_df(mc_ambient_load_fractions_mouse, mc_mt_fraction_per_cell_mouse),
+  raw_counts = mc_raw_mouse, ambient_counts = mc_raw_mouse_ambient, endogenous_counts = mc_raw_mouse_endogenous
+)
+mc_var_explained <- data.frame(
+  parameters = mc_var_expl_human[[1]],
+  percent_explained = (mc_var_expl_human$percent_explained + mc_var_expl_mouse$percent_explained) / 2
+)
+mc_var_by_cellular_params <- make_barplot_of_explained_variance(mc_var_explained)
+saveRDS(mc_var_by_cellular_params, here::here("results/main_figures/figure_2/mc_var_by_celular_params.rds"))
+mc_var_explained$dataset <- "medium_complexity"
+write_xlsx(mc_var_explained, path = here::here("results/supplemental_tables/mc_var_by_cellular_parameters.xlsx"))
+rm(mc_var_expl_human, mc_var_expl_mouse, mc_var_by_cellular_params)
+
+# High complexity
+hc_ambient_load_fractions <- calc_ambient_load_fractions(
+  raw_ambient_1 = hc_raw_mouse_ambient, raw_1 = hc_raw_mouse,
+  raw_ambient_2 = hc_raw_human_ambient, raw_2 = hc_raw_human
+)
+hc_var_expl_human <- calc_var_explained_by_cellular_params(
+  seu = hc_seu, species = "human",
+  ambient_fraction = hc_ambient_load_fractions,
+  ambient_exon_fraction_per_cell = make_biotype_df(hc_ambient_load_fractions, hc_exon_fraction_per_cell),
+  ambient_pc_fraction_per_cell = make_biotype_df(hc_ambient_load_fractions, hc_pc_fraction_per_cell),
+  ambient_ribo_fraction_per_cell = make_biotype_df(hc_ambient_load_fractions, hc_ribo_fraction_per_cell),
+  ambient_mt_fraction_per_cell = make_biotype_df(hc_ambient_load_fractions, hc_mt_fraction_per_cell),
+  raw_counts = hc_raw_human, ambient_counts = hc_raw_human_ambient, endogenous_counts = hc_raw_human_endogenous
+)
+hc_var_expl_mouse <- calc_var_explained_by_cellular_params(
+  seu = hc_seu, species = "mouse",
+  ambient_fraction = hc_ambient_load_fractions,
+  ambient_exon_fraction_per_cell = make_biotype_df(hc_ambient_load_fractions, hc_exon_fraction_per_cell),
+  ambient_pc_fraction_per_cell = make_biotype_df(hc_ambient_load_fractions, hc_pc_fraction_per_cell),
+  ambient_ribo_fraction_per_cell = make_biotype_df(hc_ambient_load_fractions, hc_ribo_fraction_per_cell),
+  ambient_mt_fraction_per_cell = make_biotype_df(hc_ambient_load_fractions, hc_mt_fraction_per_cell),
+  raw_counts = hc_raw_mouse, ambient_counts = hc_raw_mouse_ambient, endogenous_counts = hc_raw_mouse_endogenous
+)
+hc_var_explained <- data.frame(
+  parameters = hc_var_expl_human[[1]],
+  percent_explained = (hc_var_expl_human$percent_explained + hc_var_expl_mouse$percent_explained) / 2
+)
+hc_var_by_cellular_params <- make_barplot_of_explained_variance(hc_var_explained)
+saveRDS(hc_var_by_cellular_params, here::here("results/main_figures/figure_2/hc_var_by_cellular_params.rds"))
+hc_var_explained$dataset <- "high_complexity"
+write_xlsx(hc_var_explained, path = here::here("results/supplemental_tables/hc_var_by_cellular_parameters.xlsx"))
+rm(hc_var_expl_human, hc_var_expl_mouse, hc_var_by_cellular_params)
+
+# Genotype
+gen_ambient_load_fractions <- calc_ambient_load_fractions(
+  raw_ambient_1 = gen_raw_ambient, raw_1 = gen_raw_counts
+)
+gen_var_explained <- calc_var_explained_by_cellular_params_geno(
+  seu = gen_seu,
+  ambient_fraction = gen_ambient_load_fractions,
+  ambient_exon_fraction_per_cell = make_biotype_df(gen_ambient_load_fractions, gen_exon_fraction_per_cell),
+  ambient_pc_fraction_per_cell = make_biotype_df(gen_ambient_load_fractions, gen_pc_fraction_per_cell),
+  ambient_ribo_fraction_per_cell = make_biotype_df(gen_ambient_load_fractions, gen_ribo_fraction_per_cell),
+  ambient_mt_fraction_per_cell = make_biotype_df(gen_ambient_load_fractions, gen_mt_fraction_per_cell),
+  raw_counts = gen_raw_counts, ambient_counts = gen_raw_ambient, endogenous_counts = gen_raw_endogenous
+)
+gen_var_by_cellular_params <- make_barplot_of_explained_variance(gen_var_explained)
+saveRDS(gen_var_by_cellular_params, here::here("results/main_figures/figure_2/gen_var_by_celular_params.rds"))
+gen_var_explained$dataset <- "genotype"
+write_xlsx(gen_var_explained, path = here::here("results/supplemental_tables/gen_var_by_cellular_parameters.xlsx"))
+rm(gen_var_by_cellular_params)
+```
+
+------------------------------------------------------------------------
+
+## Gene-level ambient load vs feature properties
+
+### Background expression profile (empty droplets)
+
+```{r}
+lc_background <- calc_background_profile(
+  here::here("data/raw/low_complexity/raw_feature_bc_matrix"),
+  object = lc_seu,
+  threshold = 50
+)
+lc_background_mouse <- lc_background[grep("^mm10",   names(lc_background))]
+lc_background_human <- lc_background[grep("^GRCh38", names(lc_background))]
+
+# Medium complexity: average background across samples
+mc_background_human <- Reduce("+", lapply(mc_human_samples, function(samp) {
+  calc_background_profile(
+    here::here(paste0("data/raw/medium_complexity/", samp, "_STARsolo_Alignment/", samp, "_Solo.out/GeneFull_Ex50pAS/raw/")),
+    object = mc_human_seu, threshold = 50
+  )
+})) / length(mc_human_samples)
+mc_background_human_m <- mc_background_human[grep("^mm10",   names(mc_background_human))]
+mc_background_human_h <- mc_background_human[grep("^GRCh38", names(mc_background_human))]
+
+mc_background_mouse <- Reduce("+", lapply(mc_mouse_samples, function(samp) {
+  calc_background_profile(
+    here::here(paste0("data/raw/medium_complexity/", samp, "_STARsolo_Alignment/",
+                      samp, "_Solo.out/GeneFull_Ex50pAS/raw/")),
+    object = mc_mouse_seu, threshold = 50
+  )
+})) / length(mc_mouse_samples)
+mc_background_mouse_m <- mc_background_mouse[grep("^mm10",   names(mc_background_mouse))]
+mc_background_mouse_h <- mc_background_mouse[grep("^GRCh38", names(mc_background_mouse))]
+
+hc_background <- Reduce("+", lapply(hc_samples, function(samp) {
+  calc_background_profile(
+    here::here(paste0("data/raw/high_complexity/", samp, "_STARsolo_Alignment/",
+                      samp, "_Solo.out/GeneFull_Ex50pAS/raw/")),
+    object = hc_seu, threshold = 50
+  )
+})) / length(hc_samples)
+hc_background_mouse <- hc_background[grep("^mm10",   names(hc_background))]
+hc_background_human <- hc_background[grep("^GRCh38", names(hc_background))]
+
+gen_background <- Reduce("+", lapply(gen_samples, function(samp) {
+  calc_background_profile(
+    here::here(paste0("data/raw/genotype/h5-files/", samp, "_raw_feature_bc_matrix.h5")),
+    object = gen_seu, threshold = 50
+  )
+})) / length(gen_samples)
+```
+
+### Ambient load vs background expression, endogenous UMIs, endogenous features, and endogenous expression frequency
+
+These analyses follow the same pattern for each dataset. Only the core compute + save steps are shown; plotting functions are defined in `02_functions.qmd`.
+
+```{r}
+# Helper: save a scatterplot RDS and an xlsx table, then remove the data frame
+save_scatter <- function(df, plot_fn, plot_path, table_path, extra_cols = list()) {
+  p <- plot_fn(df)
+  saveRDS(p, plot_path)
+  for (col in names(extra_cols)) df[[col]] <- extra_cols[[col]]
+  write_xlsx(df, path = table_path)
+  rm(df, p)
+}
+
+# --- Ambient load vs total background expression ---
+for (ds in list(
+  list(name = "lc", df = rbind(
+    make_df_of_ambient_load_vs_total_background_expression("human", lc_background_mouse, lc_raw_human_ambient),
+    make_df_of_ambient_load_vs_total_background_expression("mouse", lc_background_human, lc_raw_mouse_ambient)
+  ), dataset = "low_complexity", fig = "lc"),
+  list(name = "mc", df = rbind(
+    make_df_of_ambient_load_vs_total_background_expression("human", mc_background_human, mc_raw_human_ambient),
+    make_df_of_ambient_load_vs_total_background_expression("mouse", mc_background_mouse, mc_raw_mouse_ambient)
+  ), dataset = "medium_complexity", fig = "mc"),
+  list(name = "hc", df = rbind(
+    make_df_of_ambient_load_vs_total_background_expression("human", hc_background_mouse, hc_raw_human_ambient),
+    make_df_of_ambient_load_vs_total_background_expression("mouse", hc_background_human, hc_raw_mouse_ambient)
+  ), dataset = "high_complexity", fig = "hc"),
+  list(name = "gen", df = data.frame(
+    log_background_expression = log1p(gen_background[match(names(rowSums(gen_raw_ambient, na.rm = TRUE)), names(gen_background))]),
+    log_ambient_expression    = log1p(rowSums(gen_raw_ambient, na.rm = TRUE))
+  ), dataset = "genotype", fig = "gen")
+)) {
+  save_scatter(
+    ds$df,
+    make_scatterplot_of_ambient_load_vs_total_background_expression,
+    here::here(paste0("results/main_figures/figure_2/", ds$fig, "_amb_load_vs_bcg_exp.rds")),
+    here::here(paste0("results/supplemental_tables/amb_load_vs_bckg_expression/", ds$fig, "_amb_load_vs_background_expression.xlsx")),
+    list(dataset = ds$dataset)
+  )
+}
+
+# Summary: mean Pearson R across datasets
+# (Computed on non-zero ambient genes)
+```
+
+------------------------------------------------------------------------
+
+# Ambient removal and endogenous retention
+
+## Method abbreviations
+
+```{r}
+tools <- c("CellBender", "CellClear", "FastCAR", "scAR", "scCDC",
+           "SoupX", "SoupX_r", "DecontX", "DecontX_r")
+tools_abbr <- c("cb", "cc", "fc", "ar", "cd", "sx", "sxr", "dx", "dxr")
+tools_map <- setNames(tools_abbr, tools)
+```
+
+## Setup corrected count lists
+
+### Low complexity
+
+```{r}
+lc_corrected_counts_human <- divide_ambient_and_endogenous_per_tool(seu = lc_seu, extract = "human")
+lc_corrected_counts_mouse <- divide_ambient_and_endogenous_per_tool(seu = lc_seu, extract = "mouse")
+```
+
+### Medium complexity
+
+```{r}
+mc_corrected_counts_human <- divide_ambient_and_endogenous_per_tool(seu = mc_human_seu, extract = "mouse")
+mc_corrected_counts_mouse <- divide_ambient_and_endogenous_per_tool(seu = mc_mouse_seu, extract = "human")
+
+# Combine human and mouse into one list with padded zero matrices
+mc_corrected_human <- list()
+mc_corrected_mouse <- list()
+
+for (name in names(mc_corrected_counts_mouse)) {
+  mouse_mat <- mc_corrected_counts_mouse[[name]]
+  rownames(mouse_mat) <- paste0("Mouse_", rownames(mouse_mat))
+
+  human_mat <- mc_corrected_counts_human[[name]]
+  rownames(human_mat) <- paste0("Human_", rownames(human_mat))
+
+  # Zero-pad so both matrices share the same rownames
+  pad_human <- Matrix::Matrix(0, nrow = nrow(mouse_mat), ncol = ncol(human_mat), sparse = TRUE, dimnames = list(rownames(mouse_mat), colnames(human_mat)))
+  pad_mouse <- Matrix::Matrix(0, nrow = nrow(human_mat), ncol = ncol(mouse_mat), sparse = TRUE, dimnames = list(rownames(human_mat), colnames(mouse_mat)))
+
+  human_mat <- Matrix::rbind2(human_mat, pad_human)
+  mouse_mat <- Matrix::rbind2(pad_mouse, mouse_mat)
+
+  mc_corrected_human[[name]] <- human_mat
+  mc_corrected_mouse[[name]] <- mouse_mat
+}
+mc_corrected_counts <- mapply(Matrix::cbind2, mc_corrected_mouse, mc_corrected_human, SIMPLIFY = FALSE)
+```
+
+### High complexity
+
+```{r}
+hc_corrected_counts_human <- divide_ambient_and_endogenous_per_tool(seu = hc_seu, extract = "human")
+hc_corrected_counts_mouse <- divide_ambient_and_endogenous_per_tool(seu = hc_seu, extract = "mouse")
+```
+
+### Genotype
+
+```{r}
+gen_corrected_counts <- list()
+
+endo_snp <- csc_all[csc_all$Ambient == 0, ]
+ambi_snp <- csc_all[csc_all$Ambient != 0, ]
+rn <- rownames(gen_raw_counts)
+cn <- colnames(gen_raw_counts)
+
+gen_corrected_counts$input_endogenous <- make_sparse_subset(endo_snp$Symbol, endo_snp$Barcode, rn, cn, gen_raw_counts)
+gen_corrected_counts$input_ambient <- make_sparse_subset(ambi_snp$Symbol, ambi_snp$Barcode, rn, cn, gen_raw_counts)
+
+assay_abbrev <- c(
+  CellBender = "cb", SoupXfull = "sx", SoupXreduced = "sxr",
+  DecontXfull = "dx", DecontXreduced = "dxr",
+  FastCAR = "fc", scCDC = "cd", scAR = "ar", CellClear = "cc"
+)
+for (assay in names(assay_abbrev)) {
+  abbr <- assay_abbrev[[assay]]
+  mat <- as(gen_seu@assays[[assay]]$counts, "dgCMatrix")
+  gen_corrected_counts[[paste0(abbr, "_endogenous")]] <- make_sparse_subset(endo_snp$Symbol, endo_snp$Barcode, rn, cn, mat)
+  gen_corrected_counts[[paste0(abbr, "_ambient")]] <- make_sparse_subset(ambi_snp$Symbol, ambi_snp$Barcode, rn, cn, mat)
+}
+```
+
+### Smart-seq2
+
+```{r}
+smart_corrected_counts <- get_total_counts_per_tool(seu = smart_seu)
+```
+
+### Synthetic
+
+The synthetic dataset uses the real ambient matrix from the simulations to define ambient ground truth (genes present in real_ambient = ambient; genes absent = endogenous).
+
+```{r}
+synt_simulations <- list()
+for (sample in synt_samples) {
+  synt_simulations[[sample]] <- readRDS(here::here(paste0(
+    "data/raw/synthetic/dataset_R_objects_full/", sample, ".Rds"
+  )))
+}
+
+# Convert Ensembl IDs to gene symbols for the ambient matrices
+synt_sims <- lapply(synt_samples, function(sample) {
+  mat <- convert_ensembl_ids_to_gene_names(synt_simulations[[sample]]$real_ambient)
+  colnames(mat) <- paste(colnames(mat), sample, sep = "_")
+  mat
+})
+names(synt_sims) <- synt_samples
+
+# Genes absent from real_ambient → endogenous; genes present → ambient
+df_endo <- do.call(rbind, lapply(names(synt_sims), function(sample_name) {
+  mat <- synt_sims[[sample_name]]
+  zero_genes <- rownames(mat)[Matrix::rowSums(mat) == 0]
+  expand.grid(feature = zero_genes, barcode = colnames(mat),
+  EEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
+}))
+
+df_amb <- do.call(rbind, lapply(names(synt_sims), function(sample_name) {
+  mat <- synt_sims[[sample_name]]
+  non_zero_genes <- rownames(mat)[Matrix::rowSums(mat) != 0]
+  expand.grid(feature = non_zero_genes, barcode = colnames(mat),
+  KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
+}))
+
+synt_raw_counts <- synt_seu@assays$RNA$counts
+rn_synt <- rownames(synt_raw_counts)
+cn_synt <- colnames(synt_raw_counts)
+
+synt_corrected_counts <- list()
+synt_corrected_counts$input_endogenous <- make_sparse_subset(df_endo$feature, df_endo$barcode, rn_synt, cn_synt, synt_raw_counts)
+synt_corrected_counts$input_ambient <- make_sparse_subset(df_amb$feature,  df_amb$barcode,  rn_synt, cn_synt, synt_raw_counts)
+
+synt_raw_counts <- as(synt_raw_counts, "dgCMatrix")
+
+for (assay in names(assay_abbrev)) {
+  abbr <- assay_abbrev[[assay]]
+  corrected <- as(synt_seu@assays[[assay]]$counts, "dgCMatrix")
+  synt_corrected_counts[[paste0(abbr, "_endogenous")]] <- make_sparse_subset(df_endo$feature, df_endo$barcode, rn_synt, cn_synt, corrected)
+  synt_corrected_counts[[paste0(abbr, "_ambient")]] <- make_ambient_subset(df_amb$feature, df_amb$barcode, rn_synt, cn_synt, synt_raw_counts, corrected)
+}
+```
+
+### Synthetic — cell type division (MCF12A, HCC1500, HS578T)
+
+```{r}
+build_synt_celltype_matrices <- function(cell_type, field, seu_obj, simulations) {
+  # Raw
+  raw <- extract_raw_counts(seu_obj, origin = cell_type)
+
+  # Build cross-sample matrix from simulations
+  mat_list <- lapply(seq_along(simulations), function(i) {
+    m <- simulations[[i]][[field]]
+    colnames(m) <- paste0(colnames(m), "_sample", i)
+    m
+  })
+  combined <- do.call(cbind, mat_list)
+  combined <- convert_ensembl_ids_to_gene_names(combined)
+
+  common_rows <- intersect(rownames(combined), rownames(raw))
+  common_cols <- intersect(colnames(combined), colnames(raw))
+  list(raw = raw, signal = combined[common_rows, common_cols, drop = FALSE])
+}
+
+MCF12A_ambient <- build_synt_celltype_matrices("MCF12A",  "real_ambient", synt_seu, synt_simulations)
+HCC1500_ambient <- build_synt_celltype_matrices("HCC1500", "real_ambient", synt_seu, synt_simulations)
+HS578T_ambient <- build_synt_celltype_matrices("HS578T",  "real_ambient", synt_seu, synt_simulations)
+
+MCF12A_endogenous <- build_synt_celltype_matrices("MCF12A",  "real_counts", synt_seu, synt_simulations)
+HCC1500_endogenous <- build_synt_celltype_matrices("HCC1500", "real_counts", synt_seu, synt_simulations)
+HS578T_endogenous <- build_synt_celltype_matrices("HS578T",  "real_counts", synt_seu, synt_simulations)
+```
+
+## Top-20 most ambient genes per dataset
+
+```{r}
+# Low complexity
+top20_lc_human <- names(sort(Matrix::rowSums(lc_corrected_counts_human$input_ambient), decreasing = TRUE)[1:20])
+top20_lc_mouse <- names(sort(Matrix::rowSums(lc_corrected_counts_mouse$input_ambient), decreasing = TRUE)[1:20])
+
+lc_top20_human <- lapply(lc_corrected_counts_human, function(mat) mat[rownames(mat) %in% top20_lc_human, ])
+lc_top20_mouse <- lapply(lc_corrected_counts_mouse, function(mat) mat[rownames(mat) %in% top20_lc_mouse, ])
+
+saveRDS(lc_top20_human, here::here("results/top20_objects/lc_top20_human.rds"))
+saveRDS(lc_top20_mouse, here::here("results/top20_objects/lc_top20_mouse.rds"))
+
+# Medium complexity
+top20_mc_human <- names(sort(Matrix::rowSums(mc_corrected_human$input_ambient), decreasing = TRUE)[1:20])
+top20_mc_mouse <- names(sort(Matrix::rowSums(mc_corrected_mouse$input_ambient), decreasing = TRUE)[1:20])
+top20_mc <- c(top20_mc_human, top20_mc_mouse)
+
+mc_top20 <- lapply(mc_corrected_counts, function(mat) mat[rownames(mat) %in% top20_mc, ])
+saveRDS(mc_top20, here::here("results/top20_objects/mc_top20.rds"))
+
+# High complexity
+top20_hc_human <- names(sort(Matrix::rowSums(hc_corrected_counts_human$input_ambient), decreasing = TRUE)[1:20])
+top20_hc_mouse <- names(sort(Matrix::rowSums(hc_corrected_counts_mouse$input_ambient), decreasing = TRUE)[1:20])
+
+hc_top20_human <- lapply(hc_corrected_counts_human, function(mat) mat[rownames(mat) %in% top20_hc_human, ])
+hc_top20_mouse <- lapply(hc_corrected_counts_mouse, function(mat) mat[rownames(mat) %in% top20_hc_mouse, ])
+
+saveRDS(hc_top20_human, here::here("results/top20_objects/hc_top20_human.rds"))
+saveRDS(hc_top20_mouse, here::here("results/top20_objects/hc_top20_mouse.rds"))
+
+# Genotype
+top20_gen <- names(sort(Matrix::rowSums(gen_corrected_counts$input_ambient), decreasing = TRUE)[1:20])
+gen_top20 <- lapply(gen_corrected_counts, function(mat) mat[rownames(mat) %in% top20_gen, ])
+saveRDS(gen_top20, here::here("results/top20_objects/gen_top20.rds"))
+```
+
+## Compartment removal plots and tables
+
+`run_compartment_removal_analysis()` (defined in `02_functions.qmd`) handles plot generation, saving, and table export for both ambient and endogenous compartments.
+
+```{r}
+# Low complexity
+lc_ambient_results <- run_compartment_removal_analysis(lc_seu, "low_complexity", "ambient",
+  here::here("results/supplemental_figures/supp_fig_3/low_complexity"),
+  here::here("results/supplemental_tables/ambient_removal/lc_ambient_removal.xlsx"))
+
+lc_endogenous_results <- run_compartment_removal_analysis(lc_seu, "low_complexity", "endogenous",
+  here::here("results/supplemental_figures/supp_fig_4/low_complexity"),
+  here::here("results/supplemental_tables/endogenous_removal/lc_endogenous_removal.xlsx"))
+
+# High complexity
+hc_ambient_results <- run_compartment_removal_analysis(hc_seu, "high_complexity", "ambient",
+  here::here("results/supplemental_figures/supp_fig_3/high_complexity"),
+  here::here("results/supplemental_tables/ambient_removal/hc_ambient_removal.xlsx"))
+
+hc_endogenous_results <- run_compartment_removal_analysis(hc_seu, "high_complexity", "endogenous",
+  here::here("results/supplemental_figures/supp_fig_4/high_complexity"),
+  here::here("results/supplemental_tables/endogenous_removal/hc_endogenous_removal.xlsx"))
+```
+
+Medium complexity, genotype, smart-seq2, and synthetic removal plots follow the same pattern but require per-species data frames (see mc_corrected_human / mc_corrected_mouse) or per-tool loops. Figures and tables are saved to the corresponding subdirectories under `results/`.
+
+------------------------------------------------------------------------
+
+## Endogenous removal vs total endogenous UMIs per feature
+
+```{r}
+# Low complexity
+lc_endo_removal_human <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  metadata = lc_seu@meta.data, dataset = "low", corrected_counts = lc_corrected_counts_human)
+lc_endo_removal_mouse <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  metadata = lc_seu@meta.data, dataset = "low", corrected_counts = lc_corrected_counts_mouse)
+lc_endogenous_removal_combined <- data.frame(
+  method = lc_endo_removal_human[[1]],
+  group = lc_endo_removal_human[[2]],
+  error = (lc_endo_removal_human$error + lc_endo_removal_mouse$error) / 2,
+  fraction_changed = (lc_endo_removal_human$fraction_changed + lc_endo_removal_mouse$fraction_changed) / 2,
+  dataset = lc_endo_removal_human[[5]]
+)
+
+mc_metadata <- rbind(mc_mouse_seu@meta.data[, c("orig.ident", "nCount_RNA")],
+                     mc_human_seu@meta.data[, c("orig.ident", "nCount_RNA")])
+mc_endogenous_removal <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  metadata = mc_metadata, dataset = "medium", corrected_counts = mc_corrected_counts)
+
+hc_endo_removal_human <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  metadata = hc_seu@meta.data, dataset = "high", corrected_counts = hc_corrected_counts_human)
+hc_endo_removal_mouse <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  metadata = hc_seu@meta.data, dataset = "high", corrected_counts = hc_corrected_counts_mouse)
+hc_endogenous_removal_combined <- data.frame(
+  method = hc_endo_removal_human[[1]],
+  group = hc_endo_removal_human[[2]],
+  error = (hc_endo_removal_human$error + hc_endo_removal_mouse$error) / 2,
+  fraction_changed  = (hc_endo_removal_human$fraction_changed + hc_endo_removal_mouse$fraction_changed) / 2,
+  dataset = hc_endo_removal_human[[5]]
+)
+
+gen_endogenous_removal  <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  gen_seu@meta.data, "genotype",  gen_corrected_counts)
+smart_endogenous_removal <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  smart_seu@meta.data, "smart-seq2", smart_corrected_counts)
+synt_endogenous_removal <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  synt_seu@meta.data,  "synthetic",  synt_corrected_counts)
+synt_wo_ambient_endogenous_removal <- calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature(
+  synt_wo_ambient_seu@meta.data, "synt_wo_ambient", synt_wo_ambient_corrected_counts)
+```
+
+## Ambient removal vs total ambient UMIs per feature
+
+```{r}
+lc_amb_removal_human <- calc_ambient_removal_vs_total_ambient_UMIs_per_feature(
+  lc_seu@meta.data, "low", lc_corrected_counts_human)
+lc_amb_removal_mouse <- calc_ambient_removal_vs_total_ambient_UMIs_per_feature(
+  lc_seu@meta.data, "low", lc_corrected_counts_mouse)
+lc_ambient_removal_combined <- data.frame(
+  method = lc_amb_removal_human[[1]],
+  group = lc_amb_removal_human[[2]],
+  error = (lc_amb_removal_human$error + lc_amb_removal_mouse$error) / 2,
+  fraction_changed = (lc_amb_removal_human$fraction_changed + lc_amb_removal_mouse$fraction_changed) / 2,
+  dataset = lc_amb_removal_human[[5]]
+)
+
+mc_corrected_counts_combined <- Matrix::cbind2(
+  do.call(Matrix::cbind2, mc_corrected_mouse),
+  do.call(Matrix::cbind2, mc_corrected_human)
+)
+mc_ambient_removal <- calc_ambient_removal_vs_total_ambient_UMIs_per_feature(
+  mc_metadata, "medium", mc_corrected_counts)
+
+hc_amb_removal_human <- calc_ambient_removal_vs_total_ambient_UMIs_per_feature(
+  hc_seu@meta.data, "high", hc_corrected_counts_human)
+hc_amb_removal_mouse <- calc_ambient_removal_vs_total_ambient_UMIs_per_feature(
+  hc_seu@meta.data, "high", hc_corrected_counts_mouse)
+hc_ambient_removal_combined <- data.frame(
+  method = hc_amb_removal_human[[1]],
+  group = hc_amb_removal_human[[2]],
+  error = (hc_amb_removal_human$error + hc_amb_removal_mouse$error) / 2,
+  fraction_changed = (hc_amb_removal_human$fraction_changed + hc_amb_removal_mouse$fraction_changed) / 2,
+  dataset = hc_amb_removal_human[[5]]
+)
+
+gen_ambient_removal <- calc_ambient_removal_vs_total_ambient_UMIs_per_feature(
+  gen_seu@meta.data, "genotype",  gen_corrected_counts)
+synt_ambient_removal <- calc_ambient_removal_vs_total_ambient_UMIs_per_feature(
+  synt_seu@meta.data, "synthetic", synt_corrected_counts)
+```
+
+## Summary statistics: removal fractions
+
+```{r}
+for (method in tools) {
+  # Ambient removal
+  amb_df <- ambient_removal[ambient_removal$decontamination_method == method, ]
+  amb_df$fraction_ambient_removed <- as.numeric(as.character(amb_df$fraction_ambient_removed))
+  mean_amb <- mean(amb_df$fraction_ambient_removed[
+    amb_df$fraction_ambient_removed >= 0 & is.finite(amb_df$fraction_ambient_removed)
+  ])
+
+  # Endogenous removal
+  endo_df <- endogenous_removal[endogenous_removal$decontamination_method == method, ]
+  endo_df$fraction_endogenous_removed <- as.numeric(as.character(endo_df$fraction_endogenous_removed))
+  mean_endo <- mean(endo_df$fraction_endogenous_removed[
+    endo_df$fraction_endogenous_removed >= 0 & is.finite(endo_df$fraction_endogenous_removed)
+  ])
+
+  message(method, " — mean ambient removed: ", round(mean_amb, 3),
+          " | mean endogenous removed: ", round(mean_endo, 3))
+}
+```
+
+## Combined removal summary (dot plot)
+
+```{r}
+# Build per-dataset removal data frames
+make_removal_df <- function(amb, endo, smart_endo = NULL, dataset_label) {
+  if (!is.null(smart_endo)) {
+    colnames(smart_endo)[3:4] <- c("error_endogenous", "fraction_changed_endogenous")
+    smart_endo$dataset <- dataset_label
+    return(smart_endo)
+  }
+  data.frame(
+    method = amb[[1]],
+    group = amb[[2]],
+    error_endogenous = endo$error,
+    error_ambient = amb$error,
+    fraction_changed_endogenous = endo$fraction_changed,
+    fraction_changed_ambient = amb$fraction_changed,
+    dataset = dataset_label
+  )
+}
+
+lc_removal_combined <- make_removal_df(lc_ambient_removal_combined,   lc_endogenous_removal_combined, dataset_label = "low")
+mc_removal_combined <- make_removal_df(mc_ambient_removal,            mc_endogenous_removal, dataset_label = "medium")
+hc_removal_combined <- make_removal_df(hc_ambient_removal_combined,   hc_endogenous_removal_combined, dataset_label = "high")
+gen_removal_combined <- make_removal_df(gen_ambient_removal,           gen_endogenous_removal, dataset_label = "genotype")
+synt_removal_combined <- make_removal_df(synt_ambient_removal,          synt_endogenous_removal, dataset_label = "synthetic")
+
+saveRDS(lc_removal_combined, here::here("results/main_figures/figure_4/lc_removal_combined.Rds"))
+saveRDS(mc_removal_combined, here::here("results/main_figures/figure_4/mc_removal_combined.Rds"))
+saveRDS(hc_removal_combined, here::here("results/main_figures/figure_4/hc_removal_combined.Rds"))
+saveRDS(gen_removal_combined, here::here("results/main_figures/figure_4/gen_removal_combined.Rds"))
+saveRDS(synt_removal_combined, here::here("results/main_figures/figure_4/synt_removal_combined.Rds"))
+
+smart_removal_endogenous <- smart_endogenous_removal
+colnames(smart_removal_endogenous)[3:4] <- c("error_endogenous", "fraction_changed_endogenous")
+saveRDS(smart_removal_endogenous, here::here("results/main_figures/figure_4/smart_removal_endogenous.Rds"))
+
+synt_wo_ambient_removal_endogenous <- synt_wo_ambient_endogenous_removal
+colnames(synt_wo_ambient_removal_endogenous)[3:4] <- c("error_endogenous", "fraction_changed_endogenous")
+saveRDS(synt_wo_ambient_removal_endogenous, here::here("results/main_figures/figure_4/synt_wo_ambient_removal_endogenous.Rds"))
+
+# Combine all datasets for dot plot
+removal_all <- dplyr::bind_rows(
+  lc_removal_combined, mc_removal_combined, hc_removal_combined,
+  gen_removal_combined, smart_removal_endogenous,
+  synt_wo_ambient_removal_endogenous, synt_removal_combined
+)
+removal_all$dataset <- factor(removal_all$dataset,
+  levels = c("low", "medium", "high", "genotype", "synthetic", "synt_wo_ambient", "smart-seq2"))
+
+saveRDS(removal_all, here::here("results/main_figures/figure_4/removal_all.Rds"))
+
+dotplot <- ggplot(removal_all, aes(x = dataset, y = method,
+                                    color = error_ambient, size = error_endogenous)) +
+  geom_point(stroke = 0) +
+  scale_color_viridis_c(option = "plasma", limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  plot_theme() +
+  labs(x = "Dataset")
+
+corr_plot <- ggplot(removal_all, aes(error_ambient, error_endogenous, color = method)) +
+  geom_point() +
+  plot_theme() +
+  scale_color_manual(values = custom_colors)
+```
+
+------------------------------------------------------------------------
+
+# Biology
+
+## Synthetic dataset: evaluate sample 3
+
+```{r}
+marker_list <- defineCleanMarkers(synt_wo_ambient_seu)
+
+unclean <- subset(synt_seu, orig.ident == "sample3"); unclean$type <- "unclean"
+clean <- subset(synt_wo_ambient_seu, orig.ident == "sample3"); clean$type <- "clean"
+
+synthetic_evaluation <- evaluateSynthetic(
+  list(clean = clean, unclean = unclean),
+  marker_list = marker_list
+)
+
+data <- synthetic_evaluation[[1]]
+data$Method <- factor(data$Method, levels = c(
+  "RNA", "CellBender", "scAR", "DecontXfull", "DecontXreduced",
+  "SoupXfull", "SoupXreduced", "CellClear", "scCDC", "FastCAR"
+))
+data$deltaModule <- data$Module - data$deltaModule
+
+write_xlsx(data, path = here::here("results/supplemental_tables/synthetic_results.xlsx"))
+
+for (metric in c("ARI", "Distance", "Module", "deltaModule")) {
+  p <- ggplot(data, aes(x = Method, y = .data[[metric]], fill = Type)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = custom_colors) +
+    plot_theme()
+  ggsave(here::here(paste0("results/main_figures/figure_4/BioInterpret_Synthetic_", metric, ".pdf")), plot = p, width = 10, height = 10)
+}
+
+pdf(here::here("results/main_figures/figure_4/BioInterpret_Synthetic.pdf"), width = 50, height = 40, useDingbats = FALSE)
+print(patchwork::wrap_plots(synthetic_evaluation[[2]], ncol = 5, nrow = 4, byrow = TRUE))
+dev.off()
+```
+
+## Integration quality
+
+```{r}
+datasets_integration <- list(
+  Synthetic = list(Path = here::here("data/processed/synthetic/seurat_object/synt_seu.Rds"),
+  markers = c("KRT19", "ANKRD30A", "RAB11FIP1", "COL1A2", "VIM", "POSTN", "S100A2", "RPL11", "RPS27")),
+  Synthetic_Clean = list(Path = here::here("data/processed/synthetic/seurat_object/synt_seu_wo_ambient.Rds"),
+  markers = c("KRT19", "ANKRD30A", "RAB11FIP1", "COL1A2", "VIM", "POSTN", "S100A2", "RPL11", "RPS27")),
+  Medium_Mouse = list(Path = here::here("data/processed/medium_complexity/seurat_object/mc_mouse_seu.Rds"),
+  markers = c("mm10-Gcg", "mm10-Ttr", "mm10-Irx2", "mm10-Ins2", "mm10-Iapp", "mm10-G6pc2", "mm10-Ppy", "mm10-Id2", "mm10-Gcnt3", "mm10-Sst", "mm10-Rbp4", "mm10-Lepr")),
+  Medium_Human = list(Path = here::here("data/processed/medium_complexity/seurat_object/mc_human_seu.Rds"),
+  markers = c("GRCh38-GCG", "GRCh38-TTR", "GRCh38-IRX2", "GRCh38-INS", "GRCh38-IAPP", "GRCh38-G6PC2", "GRCh38-PPY", "GRCh38-ID2", "GRCh38-GCNT3", "GRCh38-SST", "GRCh38-RBP4", "GRCh38-LEPR")),
+  High = list(Path = here::here("data/processed/high_complexity/seurat_object/hc_seu.Rds"),
+  markers = c("GRCh38-GCG", "GRCh38-TTR", "GRCh38-IRX2", "GRCh38-INS", "GRCh38-IAPP", "GRCh38-G6PC2", "mm10-Emcn", "mm10-Nphs2", "mm10-Slc5a2", "mm10-Slc12a3", "mm10-C1qb", "mm10-Siglech")),
+  Genotype = list(Path = here::here("data/processed/genotype/seurat_object/gen_seu.Rds"),
+  markers = c("Emcn", "Nphs2", "Slc5a2", "Slc12a3", "C1qb", "Siglech", "Igkc", "Nkg7", "S100a4"))
+)
+
+integration <- plyr::llply(datasets_integration, .progress = "text", .fun = function(x) {
+  out_file <- gsub(".Rds", "_integration.Rds", x$Path)
+  if (file.exists(out_file)) return(readRDS(out_file))
+  object <- readRDS(x$Path)
+  result <- tryCatch(evaluateIntegration(object, known_markers = x$markers), error = function(e) "Failed")
+  if (is.data.frame(result)) saveRDS(result, out_file)
+  rm(object); gc()
+  result
+})
+```
+
+## Per-sample biology
+
+```{r}
+datasets_biology <- list(
+  Low = list(Path = here::here("data/processed/low_complexity/seurat_object/lc_seu.Rds"),
+  markers = c("GRCh38-POLR2J3", "GRCh38-RWDD1", "GRCh38-DUXAP8", "mm10-Atxn7l3b", "mm10-Son", "mm10-Sec62"),
+  evalNhoods = TRUE,  evalDeNovo = TRUE,  species_label = "origin"),
+  Medium_Mouse  = list(Path = here::here("data/processed/medium_complexity/seurat_object/mc_mouse_seu.Rds"),
+  markers = c("mm10-Gcg", "mm10-Ttr", "mm10-Irx2", "mm10-Ins2", "mm10-Iapp", "mm10-G6pc2"),
+  evalNhoods = TRUE,  evalDeNovo = TRUE,  species_label = "origin"),
+  Medium_Human = list(Path = here::here("data/processed/medium_complexity/seurat_object/mc_human_seu.Rds"),
+  markers = c("GRCh38-GCG", "GRCh38-TTR", "GRCh38-IRX2", "GRCh38-INS", "GRCh38-IAPP", "GRCh38-G6PC2"),
+  evalNhoods = TRUE,  evalDeNovo = TRUE,  species_label = "origin"),
+  High = list(Path = here::here("data/processed/high_complexity/seurat_object/hc_seu.Rds"),
+  markers = c("GRCh38-GCG", "GRCh38-INS", "mm10-Emcn", "mm10-Nphs2", "mm10-C1qb"),
+                       evalNhoods = TRUE,  evalDeNovo = TRUE,  species_label = "origin"),
+  Genotype = list(Path = here::here("data/processed/genotype/seurat_object/gen_seu.Rds"),
+  markers = c("Emcn", "Nphs2", "Slc5a2", "Slc12a3", "C1qb"),
+  evalNhoods = FALSE, evalDeNovo = TRUE,  species_label = "origin"),
+  Synthetic = list(Path = here::here("data/processed/synthetic/seurat_object/synt_seu.Rds"),
+  markers = c("KRT19", "ANKRD30A", "RAB11FIP1", "COL1A2", "VIM", "POSTN"),
+  evalNhoods = TRUE,  evalDeNovo = FALSE, species_label = "celltype"),
+  Synthetic_Clean = list(Path = here::here("data/processed/synthetic/seurat_object/synt_seu_wo_ambient.Rds"),
+  markers = c("KRT19", "ANKRD30A", "RAB11FIP1", "COL1A2", "VIM", "POSTN"),
+  evalNhoods = TRUE,  evalDeNovo = FALSE, species_label = "celltype")
+)
+
+sample_biology <- plyr::llply(datasets_biology, .progress = "text", .fun = function(x) {
+  out_file <- gsub(".Rds", "_sample_biology.Rds", x$Path)
+  if (file.exists(out_file)) return(readRDS(out_file))
+  object <- readRDS(x$Path)
+  result <- tryCatch(
+    evaluatePerSampleBiology(object, known_markers = x$markers,
+                             species_label = x$species_label,
+                             evalNhoods = x$evalNhoods,
+                             evalDeNovo = x$evalDeNovo),
+    error = function(e) "Failed"
+  )
+  if (is.data.frame(result)) saveRDS(result, out_file)
+  rm(object); gc()
+  result
+})
+```
+
+## Label transfer
+
+Label transfer is performed for medium complexity (pancreas reference), high complexity (pancreas reference), and genotype (kidney reference). The synthetic dataset is excluded from label transfer evaluation.
+
+```{r}
+datasets_labels <- list(
+  Medium_Mouse = list(Path = here::here("data/processed/medium_complexity/seurat_object/mc_mouse_seu.Rds"), reference_path = "Pancreas", subsetTo = "mouse",  split_genes_by_origin = TRUE),
+  Medium_Human = list(Path = here::here("data/processed/medium_complexity/seurat_object/mc_human_seu.Rds"), reference_path = "Pancreas", subsetTo = "human",  split_genes_by_origin = TRUE),
+  High = list(Path = here::here("data/processed/high_complexity/seurat_object/hc_seu.Rds"), reference_path = "Pancreas", subsetTo = "human",  split_genes_by_origin = TRUE),
+  Genotype = list(Path = here::here("data/processed/genotype/seurat_object/gen_seu.Rds"), reference_path = "Kidney",   subsetTo = NULL,     split_genes_by_origin = FALSE)
+)
+
+labels <- plyr::llply(datasets_labels, .progress = "text", .fun = function(x) {
+  out_file <- gsub(".Rds", "_labels.Rds", x$Path)
+  if (file.exists(out_file)) return(readRDS(out_file))
+  object <- readRDS(x$Path)
+  result <- tryCatch(
+    evaluateLabelTransfer(object, reference_path = x$reference_path, subsetTo = x$subsetTo, split_genes_by_origin = x$split_genes_by_origin),
+    error = function(e) "Failed"
+  )
+  if (is.data.frame(result)) saveRDS(result, out_file)
+  rm(object); gc()
+  result
+})
+```
+
+## Collect results and save figures
+
+```{r}
+labels_res <- collectResults(labels, columns = c("Mapping", "Annotation", "Purity", "RMSE", "cASW", "ARI"))
+ggsave(here::here("results/main_figures/figure_5/labels_results.pdf"),
+       plot = labels_res[[1]], width = 10, height = 10)
+write_xlsx(labels_res[[2]], path = here::here("results/main_figures/figure_5/labels_results.xlsx"))
+
+integrated_res <- collectResults(integration, columns = c("LISI", "ASW", "PCR", "ARI", "Gini", "Entropy", "Morans"), subsetColumn = "State", subsetTo = "Integrated")
+unintegrated_res <- collectResults(integration, columns = c("LISI", "ASW", "PCR", "ARI", "Gini", "Entropy", "Morans"), subsetColumn = "State", subsetTo = "Unintegrated")
+ggsave(here::here("results/main_figures/figure_5/integrated_results.pdf"),
+       plot = integrated_res[[1]], width = 10, height = 10)
+ggsave(here::here("results/main_figures/figure_5/unintegrated_results.pdf"),
+       plot = unintegrated_res[[1]], width = 10, height = 10)
+write_xlsx(list(integrated = integrated_res[[2]], unintegrated = unintegrated_res[[2]]), path = here::here("results/main_figures/figure_5/integration_results.xlsx"))
+
+samples_res <- collectResults(sample_biology, columns = c("Purity", "Species", "Markers", "Entropy", "Morans", "Gini"))
+ggsave(here::here("results/main_figures/figure_5/sample_biology_results.pdf"),
+       plot = samples_res[[1]], width = 10, height = 10)
+write_xlsx(samples_res[[2]], path = here::here("results/main_figures/figure_5/sample_biology_results.xlsx"))
+```

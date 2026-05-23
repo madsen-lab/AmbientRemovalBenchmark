@@ -1,0 +1,1044 @@
+---
+title: "02_functions"
+format: pdf
+editor: visual
+---
+
+All self-written functions used throughout this study are listed here, organised by the analysis step in which they are used.
+
+**`scripts/R/R_files/01_functions.R` is the canonical source of all functions.** This `.qmd` file documents those functions with formatted prose and roxygen headers, but the code shown here mirrors `01_functions.R` exactly. Downstream scripts source the `.R` file directly.
+
+# Source functions
+
+```{r}
+# All downstream scripts begin with this line
+source(here::here("scripts/R/R_files/01_functions.R"))
+```
+
+------------------------------------------------------------------------
+
+# Preprocessing and quality control
+
+```{r}
+#' Load a STARsolo / CellRanger output folder
+#'
+#' Reads barcodes.tsv, features.tsv, and matrix.mtx from a directory and
+#' returns a sparse count matrix.
+#'
+#' @param folder Character. Path to the folder containing the three files.
+#'
+#' @return A sparse CsparseMatrix (genes x barcodes).
+load_folder <- function(folder) {
+  barcodes <- read.delim(file.path(folder, "barcodes.tsv"), header = FALSE)
+  features <- read.delim(file.path(folder, "features.tsv"), header = FALSE)
+  counts   <- Matrix::readMM(file.path(folder, "matrix.mtx"))
+  colnames(counts) <- barcodes$V1
+  rownames(counts) <- features$V2
+  counts <- as(counts, "CsparseMatrix")
+  return(counts)
+}
+```
+
+------------------------------------------------------------------------
+
+# Running decontamination methods
+
+## R-based methods
+
+```{r}
+#' Run all R-based ambient RNA decontamination methods
+#'
+#' Runs FastCAR, scCDC, DecontX (full and reduced), and SoupX (full and
+#' reduced) on one or more samples. Clustering is performed with Seurat
+#' (and Harmony for multi-sample datasets) before the methods are applied.
+#'
+#' @param counts Named list of raw count matrices (genes x barcodes), one
+#'   per sample.
+#' @param barcodes Named list of character vectors giving the cell barcodes
+#'   to retain (e.g. post-emptyDrops), one per sample.
+#' @param dims Integer. PCA / Harmony dimensions for neighbour finding
+#'   (default 10).
+#' @param resolution Numeric. Seurat clustering resolution (default 0.1).
+#' @param nfeat Integer. Number of variable features (default 2000).
+#'
+#' @return A Seurat object containing the RNA assay plus one assay per
+#'   method: FastCAR, scCDC, SoupXfull, SoupXreduced, DecontXfull,
+#'   DecontXreduced.
+run_decontamination_methods <- function(counts,
+                                        barcodes,
+                                        dims       = 10,
+                                        resolution = 0.1,
+                                        nfeat      = 2000) {
+
+  # ------------------------------------------------------------------
+  # 1. Subset matrices and build per-sample Seurat objects
+  # ------------------------------------------------------------------
+  message("Setting up data and clustering.")
+
+  seu_list    <- list()
+  subset_list <- list()
+
+  for (dataset in seq_along(counts)) {
+
+    # Append sample name to barcodes to ensure uniqueness across samples
+    colnames(counts[[dataset]]) <- paste(
+      colnames(counts[[dataset]]), names(counts)[dataset], sep = "_"
+    )
+    barcodes[[dataset]] <- paste(
+      barcodes[[dataset]], names(counts)[dataset], sep = "_"
+    )
+
+    # Subset to called cells; remove all-zero genes
+    subset_list[[dataset]] <- counts[[dataset]][
+      , colnames(counts[[dataset]]) %in% barcodes[[dataset]]
+    ]
+    subset_list[[dataset]] <- subset_list[[dataset]][
+      Matrix::rowSums(subset_list[[dataset]]) >= 1, 
+    ]
+    names(subset_list)[dataset]          <- names(counts)[dataset]
+    rownames(subset_list[[dataset]])     <- make.unique(rownames(subset_list[[dataset]]))
+
+    # Create Seurat object
+    seu_list[[dataset]] <- suppressWarnings(
+      CreateSeuratObject(
+        counts       = subset_list[[dataset]],
+        project      = names(counts)[dataset],
+        min.cells    = 0,
+        min.features = 0
+      )
+    )
+
+    # Store barcode as metadata for downstream matching
+    seu_list[[dataset]]@meta.data$barcode <- colnames(subset_list[[dataset]])
+
+    # Basic QC: >= 200 features per cell; gene detected in >= 3 cells
+    seu_list[[dataset]] <- subset(
+      seu_list[[dataset]],
+      cells = rownames(seu_list[[dataset]]@meta.data)[
+        seu_list[[dataset]]$nFeature_RNA >= 200
+      ]
+    )
+    seu_list[[dataset]] <- subset(
+      seu_list[[dataset]],
+      features = names(which(
+        rowSums(seu_list[[dataset]]@assays$RNA$counts > 0) >= 3
+      ))
+    )
+  }
+
+  # ------------------------------------------------------------------
+  # 2. Merge samples and cluster
+  # ------------------------------------------------------------------
+  if (length(counts) > 1) {
+    seu <- suppressWarnings(merge(seu_list[[1]], seu_list[2:length(seu_list)]))
+  } else {
+    seu <- seu_list[[1]]
+  }
+
+  seu <- NormalizeData(seu, verbose = FALSE)
+  seu <- FindVariableFeatures(seu, verbose = FALSE, nfeatures = nfeat)
+  seu <- ScaleData(seu, features = rownames(seu), verbose = FALSE)
+  seu <- RunPCA(seu, verbose = FALSE)
+
+  if (length(counts) > 1) {
+    seu <- suppressWarnings(
+      RunHarmony(seu, group.by.vars = "orig.ident", verbose = FALSE)
+    )
+    seu <- FindNeighbors(seu, dims = 1:dims, reduction = "harmony", verbose = FALSE)
+  } else {
+    seu <- FindNeighbors(seu, dims = 1:dims, verbose = FALSE)
+  }
+  seu <- FindClusters(seu, resolution = resolution, verbose = FALSE)
+
+  # Species fraction metadata (relevant for barnyard / species-mixing datasets)
+  seu[["input.percent.mm10"]]   <- PercentageFeatureSet(seu, pattern = "^mm10")
+  seu[["input.percent.GRCh38"]] <- PercentageFeatureSet(seu, pattern = "^GRCh38")
+
+  # Re-split merged object into per-sample objects for method execution
+  for (dataset in seq_along(counts)) {
+    seu_list[[dataset]] <- subset(
+      seu,
+      cells = rownames(seu@meta.data)[seu$orig.ident == names(counts)[dataset]]
+    )
+  }
+
+  # ------------------------------------------------------------------
+  # 3. Run decontamination methods per sample
+  # ------------------------------------------------------------------
+  fastcar         <- list()
+  cdc_full        <- list()
+  soupx_full      <- list()
+  soupx_reduced   <- list()
+  decontx_full    <- list()
+  decontx_reduced <- list()
+
+  for (dataset in seq_along(counts)) {
+
+    # Prepare filtered and raw matrices with matching rownames
+    filt_matrix <- seu_list[[dataset]]@assays$RNA$counts
+    colnames(filt_matrix) <- seu_list[[dataset]]$barcode
+
+    raw_matrix              <- counts[[dataset]]
+    rownames(raw_matrix)    <- gsub("_", "-", rownames(raw_matrix))
+    raw_matrix              <- raw_matrix[!duplicated(rownames(raw_matrix)), ]
+    filt_matrix             <- filt_matrix[!duplicated(rownames(filt_matrix)), ]
+    rownames(filt_matrix)   <- gsub("_", "-", rownames(filt_matrix))
+    filt_matrix             <- filt_matrix[rownames(filt_matrix) %in% rownames(raw_matrix), ]
+    raw_matrix              <- raw_matrix[rownames(raw_matrix) %in% rownames(filt_matrix), ]
+    filt_matrix             <- filt_matrix[match(rownames(raw_matrix), rownames(filt_matrix)), ]
+
+    clusters <- data.frame(
+      barcode = seu_list[[dataset]]$barcode,
+      cluster = seu_list[[dataset]]$seurat_clusters
+    )
+    clusters <- clusters[match(colnames(filt_matrix), clusters$barcode), ]
+
+    message(paste0("\nRunning decontamination for: ", names(counts)[dataset]))
+
+    # --- FastCAR ---
+    message("\tRunning FastCAR.")
+    ambProfile <- FastCAR::describe.ambient.RNA.sequence(
+      fullCellMatrix            = counts[[dataset]],
+      start                     = 10,
+      stop                      = 500,
+      by                        = 10,
+      contaminationChanceCutoff = 0.05
+    )
+    emptyDropletCutoff <- FastCAR::recommend.empty.cutoff(ambProfile)
+    ambientProfile     <- FastCAR::determine.background.to.remove(
+      counts[[dataset]], counts[[dataset]],
+      emptyDropletCutoff        = emptyDropletCutoff,
+      contaminationChanceCutoff = 0.05
+    )
+    fastcar[[dataset]] <- FastCAR::remove.background(subset_list[[dataset]], ambientProfile)
+
+    # --- SoupX full (raw + filtered matrices) ---
+    message("\tRunning SoupX.")
+    sc           <- SoupChannel(raw_matrix, filt_matrix)
+    sc           <- setClusters(sc, setNames(clusters$cluster, clusters$barcode))
+    sc           <- autoEstCont(sc, doPlot = FALSE, verbose = FALSE)
+    soupx_full[[dataset]] <- suppressWarnings(adjustCounts(sc, verbose = FALSE))
+
+    # --- SoupX reduced (filtered matrix only; soup profile from data) ---
+    sc_no_drops <- SoupChannel(filt_matrix, filt_matrix, calcSoupProfile = FALSE)
+    sc_no_drops <- setClusters(sc_no_drops, setNames(clusters$cluster, clusters$barcode))
+    soup_prof   <- data.frame(
+      row.names = rownames(filt_matrix),
+      est       = rowSums(filt_matrix) / sum(filt_matrix),
+      counts    = rowSums(filt_matrix)
+    )
+    sc_no_drops <- setSoupProfile(sc_no_drops, soup_prof)
+    sc_no_drops <- autoEstCont(sc_no_drops, doPlot = FALSE, verbose = FALSE)
+    soupx_reduced[[dataset]] <- suppressWarnings(adjustCounts(sc_no_drops, verbose = FALSE))
+
+    # --- scCDC ---
+    message("\tRunning scCDC.")
+    out <- capture.output(
+      contamination <- suppressMessages(suppressWarnings(
+        ContaminationDetection(
+          seu_list[[dataset]],
+          restriction_factor = 0.8,
+          sample_name        = names(counts)[dataset]
+        )
+      ))
+    )
+    out <- capture.output(
+      cdc_full[[dataset]] <- suppressMessages(suppressWarnings(
+        ContaminationCorrection(
+          seu_list[[dataset]],
+          cont_genes = rownames(contamination),
+          auc_thres  = 0.9
+        )
+      ))
+    )
+    cdc_full[[dataset]]              <- cdc_full[[dataset]]@assays$Corrected$counts
+    colnames(cdc_full[[dataset]])    <- seu_list[[dataset]]$barcode
+
+    # --- DecontX full (uses raw matrix as background) ---
+    message("\tRunning DecontX.")
+    out <- capture.output(
+      decontx_full[[dataset]] <- decontX(
+        x          = filt_matrix,
+        z          = clusters$cluster,
+        background = raw_matrix,
+        verbose    = FALSE
+      )
+    )
+    decontx_full[[dataset]] <- decontx_full[[dataset]]$decontXcounts
+
+    # --- DecontX reduced (no background matrix) ---
+    out <- capture.output(
+      decontx_reduced[[dataset]] <- decontX(
+        x       = filt_matrix,
+        z       = clusters$cluster,
+        verbose = FALSE
+      )
+    )
+    decontx_reduced[[dataset]] <- decontx_reduced[[dataset]]$decontXcounts
+  }
+
+  # ------------------------------------------------------------------
+  # 4. Add corrected counts as assays to the merged Seurat object
+  # ------------------------------------------------------------------
+  message("\nAdding assays.")
+  seu <- add_assay(seu, fastcar,         "FastCAR")
+  seu <- add_assay(seu, cdc_full,        "scCDC")
+  seu <- add_assay(seu, soupx_full,      "SoupXfull")
+  seu <- add_assay(seu, soupx_reduced,   "SoupXreduced")
+  seu <- add_assay(seu, decontx_full,    "DecontXfull")
+  seu <- add_assay(seu, decontx_reduced, "DecontXreduced")
+
+  return(seu)
+}
+```
+
+## Python-based methods
+
+```{r}
+#' Read a corrected count matrix from an H5 or H5AD file
+#'
+#' Parses sparse matrix indices via rhdf5. Supports CellBender (H5),
+#' scAR (H5AD), and CellClear (H5AD) output formats.
+#'
+#' @param path Character. Path to the H5 or H5AD file.
+#' @param type Character. One of "CellBender", "scAR", or "CellClear"
+#'   (default "CellBender").
+#' @param name Character. Sample name appended to barcodes for uniqueness.
+#'
+#' @return A sparse dgCMatrix (genes x barcodes).
+read_H5AD <- function(path, type = "CellBender", name) {
+  root <- rhdf5::H5Fopen(path)
+
+  if (type %in% c("scAR", "CellClear")) {
+    i <- as.vector(unlist(rhdf5::h5read(root, "/X/indices")))
+    p <- as.vector(unlist(rhdf5::h5read(root, "/X/indptr")))
+    x <- as.vector(unlist(rhdf5::h5read(root, "/X/data")))
+    o <- as.vector(rhdf5::h5read(root, "/obs")$"_index")
+    v <- as.vector(rhdf5::h5read(root, "/var")$"_index")
+  } else if (type == "CellBender") {
+    i <- as.vector(unlist(rhdf5::h5read(root, "/matrix/indices")))
+    p <- as.vector(unlist(rhdf5::h5read(root, "/matrix/indptr")))
+    x <- as.vector(unlist(rhdf5::h5read(root, "/matrix/data")))
+    o <- as.vector(rhdf5::h5read(root, "/matrix/barcodes"))
+    v <- as.vector(rhdf5::h5read(root, "/matrix/features/name"))
+  }
+
+  rhdf5::H5Fclose(root)
+
+  dims   <- c(length(v), length(o))
+  counts <- Matrix::sparseMatrix(i = i, p = p, x = x, index1 = FALSE, dims = dims)
+  rownames(counts) <- v
+  colnames(counts) <- paste(o, name, sep = "_")
+  return(counts)
+}
+```
+
+```{r}
+#' Add a list of corrected count matrices as a new Seurat assay
+#'
+#' Aligns each matrix to the features and barcodes in `object`, padding
+#' missing genes with zeros, then inserts the combined matrix as a new
+#' assay and adds species fraction metadata columns.
+#'
+#' @param object A Seurat object.
+#' @param mat Named list of corrected count matrices (one per sample).
+#' @param name Character. Name for the new assay (e.g. "CellBender").
+#'
+#' @return The Seurat object with the new assay added.
+add_assay <- function(object, mat, name) {
+
+  for (dataset in seq_along(mat)) {
+    rownames(mat[[dataset]]) <- gsub("_", "-", rownames(mat[[dataset]]))
+    mat[[dataset]] <- mat[[dataset]][
+      rownames(mat[[dataset]]) %in% rownames(object@assays$RNA$counts), 
+    ]
+    mat[[dataset]] <- mat[[dataset]][!duplicated(rownames(mat[[dataset]])), ]
+
+    # Pad with zero rows for genes absent from this sample's output
+    if (nrow(object) > nrow(mat[[dataset]])) {
+      missing_genes  <- rownames(object)[
+        !(rownames(object) %in% rownames(mat[[dataset]]))
+      ]
+      missing_counts <- Matrix::Matrix(
+        0,
+        nrow     = length(missing_genes),
+        ncol     = ncol(mat[[dataset]]),
+        sparse   = TRUE,
+        dimnames = list(missing_genes, colnames(mat[[dataset]]))
+      )
+      mat[[dataset]] <- rbind(missing_counts, mat[[dataset]])
+    }
+
+    mat[[dataset]] <- mat[[dataset]][
+      match(rownames(object@assays$RNA$counts), rownames(mat[[dataset]])), 
+    ]
+  }
+
+  mat <- do.call("cbind", mat)
+
+  # Restrict to barcodes present in both object and corrected matrix
+  barcodes.keep <- intersect(object$barcode, colnames(mat))
+  object        <- subset(object, cells = barcodes.keep)
+  mat           <- mat[, match(object$barcode, colnames(mat))]
+  colnames(mat) <- colnames(object)
+
+  # Insert assay and add species fraction columns
+  object[[name]] <- CreateAssayObject(mat, min.cells = 0, min.features = 0)
+  object[[paste0(name, ".percent.mm10")]]   <- PercentageFeatureSet(
+    object, pattern = "^mm10",   assay = name
+  )[, 1]
+  object[[paste0(name, ".percent.GRCh38")]] <- PercentageFeatureSet(
+    object, pattern = "^GRCh38", assay = name
+  )[, 1]
+
+  return(object)
+}
+```
+
+------------------------------------------------------------------------
+
+# Analysing results from ambient RNA removal
+
+```{r}
+#' Calculate per-cell and per-gene exon fractions
+#'
+#' Compares Gene (exon-only) and GeneFull_Ex50pAS (full gene body) STARsolo
+#' output folders to derive the fraction of UMIs from exonic regions.
+#'
+#' @param path Character. Path to the STARsolo Solo.out directory (must
+#'   contain GeneFull_Ex50pAS/raw/ and Gene/raw/ subdirectories).
+#' @param object A Seurat object used to match barcodes.
+#' @param name Character. Sample name used in barcode construction.
+#' @param paste1 Logical. If TRUE (default) barcodes are formatted as
+#'   "<barcode>-1_<name>"; if FALSE, "<barcode>_<name>".
+#'
+#' @return A named list with elements:
+#'   \describe{
+#'     \item{cells}{Per-cell exon fractions (named numeric vector).}
+#'     \item{features}{Per-gene exon fractions (named numeric vector).}
+#'   }
+calculate_exon_fraction <- function(path, object, name, paste1 = TRUE) {
+  total <- load_folder(file.path(path, "GeneFull_Ex50pAS", "raw"))
+  exon  <- load_folder(file.path(path, "Gene", "raw"))
+
+  total <- total[rownames(total) %in% rownames(exon), ]
+  exon  <- exon[rownames(total), ]
+
+  if (paste1) {
+    colnames(total) <- paste0(colnames(total), "-1_", name)
+    colnames(exon)  <- paste0(colnames(exon),  "-1_", name)
+  } else {
+    colnames(total) <- paste0(colnames(total), "_", name)
+    colnames(exon)  <- paste0(colnames(exon),  "_", name)
+  }
+
+  total <- total[, colnames(total) %in% colnames(object)]
+  exon  <- exon[,  colnames(exon)  %in% colnames(object)]
+
+  list(
+    cells    = colSums(exon) / colSums(total),
+    features = rowSums(exon) / rowSums(total)
+  )
+}
+```
+
+```{r}
+#' Estimate ambient background expression from empty droplets
+#'
+#' Identifies droplets with total UMI count <= `threshold`, sums their
+#' counts per gene, and returns the result aligned to `object`.
+#'
+#' @param path Character. Path to a count matrix folder readable by
+#'   \code{load_folder()}.
+#' @param object A Seurat object used to match the gene set.
+#' @param threshold Integer. Max UMI count to treat a droplet as empty
+#'   (default 50).
+#'
+#' @return Named numeric vector of summed ambient UMI counts per gene,
+#'   ordered to match \code{rownames(object)}.
+calculate_background_profile <- function(path, object, threshold = 50) {
+  counts <- load_folder(path)
+
+  background_barcodes <- names(which(colSums(counts) <= threshold))
+  background          <- counts[, colnames(counts) %in% background_barcodes]
+
+  rownames(background) <- gsub("_",   "-", rownames(background))
+  rownames(background) <- gsub("---", "-", rownames(background))
+  background <- background[rownames(background) %in% rownames(object), ]
+  background <- background[!duplicated(rownames(background)), ]
+
+  # Pad missing genes with zeros
+  missing_genes  <- rownames(object)[!(rownames(object) %in% rownames(background))]
+  missing_counts <- Matrix::Matrix(
+    0, nrow = length(missing_genes), ncol = ncol(background), sparse = TRUE,
+    dimnames = list(missing_genes, colnames(background))
+  )
+  background <- rbind(missing_counts, background)
+  background <- background[match(rownames(object), rownames(background)), ]
+
+  rowSums(background)
+}
+```
+
+```{r}
+#' Calculate per-cell ambient RNA load percentages
+#'
+#' Computes the ambient fraction (as a percentage) per cell. When `samples`
+#' and `seu` are supplied, results are grouped by sample and returned as a
+#' data frame suitable for ridge plots.
+#'
+#' @param ambient_list Named list of ambient count matrices.
+#' @param raw_list Named list of total (raw) count matrices. Must have the
+#'   same names as `ambient_list`.
+#' @param samples Optional character vector of sample names. When provided,
+#'   results are grouped by sample.
+#' @param seu Optional Seurat object whose metadata is used to assign cells
+#'   to samples (required when `samples` is not NULL).
+#'
+#' @return If `samples` is NULL: a numeric vector of per-cell ambient
+#'   percentages. Otherwise: a data frame with columns `group` (sample
+#'   label) and `value` (ambient percentage per cell).
+calc_ambient_load_percentages <- function(ambient_list, raw_list,
+                                           samples = NULL, seu = NULL) {
+  if (is.null(names(ambient_list)) || any(names(ambient_list) == "")) {
+    stop("All elements of ambient_list must be named.")
+  }
+  if (is.null(names(raw_list)) || any(names(raw_list) == "")) {
+    stop("All elements of raw_list must be named.")
+  }
+  if (!setequal(names(ambient_list), names(raw_list))) {
+    stop("ambient_list and raw_list must have the same names.")
+  }
+
+  raw_list <- raw_list[names(ambient_list)]
+
+  if (is.null(samples)) {
+    ambient_load <- numeric()
+    for (name in names(ambient_list)) {
+      ambient_load <- c(
+        ambient_load,
+        (colSums(ambient_list[[name]], na.rm = TRUE) /
+           colSums(raw_list[[name]],   na.rm = TRUE)) * 100
+      )
+    }
+    return(ambient_load[!is.na(ambient_load)])
+
+  } else {
+    ambient_load_list <- list()
+    for (i in seq_along(samples)) {
+      sample_cols <- rownames(seu@meta.data)[seu$orig.ident == samples[i]]
+      values      <- numeric()
+      for (name in names(ambient_list)) {
+        values <- c(
+          values,
+          (colSums(ambient_list[[name]][, colnames(ambient_list[[name]]) %in% sample_cols, drop = FALSE], na.rm = TRUE) /
+             colSums(raw_list[[name]][,   colnames(raw_list[[name]])    %in% sample_cols, drop = FALSE], na.rm = TRUE)) * 100
+        )
+      }
+      ambient_load_list[[paste0("S", i)]] <- values[!is.na(values)]
+    }
+
+    df <- data.frame(
+      group = rep(names(ambient_load_list), lengths(ambient_load_list)),
+      value = unlist(ambient_load_list, use.names = FALSE)
+    )
+    return(df[!is.na(df$value), ])
+  }
+}
+```
+
+```{r}
+#' Match ambient load with exon fractions (medium complexity dataset)
+#'
+#' Builds a combined data frame of per-gene exon fractions and log-ambient
+#' expression for use in scatter plots, handling the cross-species design
+#' of the medium complexity dataset separately for human and mouse samples.
+#'
+#' @param exon_fraction_per_feature_1 Named numeric vector of per-gene exon
+#'   fractions for the first sample group (human samples).
+#' @param exon_fraction_per_feature_2 Named numeric vector of per-gene exon
+#'   fractions for the second sample group (mouse samples).
+#' @param raw_human_ambient Sparse matrix of ambient counts from human
+#'   samples (GRCh38 genes contaminating mouse spike-in cells).
+#' @param raw_mouse_ambient Sparse matrix of ambient counts from mouse
+#'   samples (mm10 genes contaminating human spike-in cells).
+#'
+#' @return A data frame with columns `exon_fraction`, `log_ambient_expression`,
+#'   and `species`.
+match_ambient_load_with_exon_fractions_mc <- function(exon_fraction_per_feature_1,
+                                                       exon_fraction_per_feature_2,
+                                                       raw_human_ambient,
+                                                       raw_mouse_ambient) {
+  # Human samples: ambient signal is from GRCh38 genes
+  ef_human <- exon_fraction_per_feature_1[grepl("^GRCh38", names(exon_fraction_per_feature_1))]
+  ef_human <- ef_human[names(ef_human) %in% rownames(raw_human_ambient)]
+  raw_human_ambient <- raw_human_ambient[
+    rownames(raw_human_ambient) %in% names(exon_fraction_per_feature_1), 
+  ]
+  raw_human_ambient <- raw_human_ambient[match(names(ef_human), rownames(raw_human_ambient)), ]
+
+  df_human <- data.frame(
+    exon_fraction          = ef_human,
+    log_ambient_expression = log1p(rowSums(raw_human_ambient)),
+    species                = "human"
+  )
+
+  # Mouse samples: ambient signal is from mm10 genes
+  ef_mouse <- exon_fraction_per_feature_2[grepl("^mm10", names(exon_fraction_per_feature_2))]
+  ef_mouse <- ef_mouse[names(ef_mouse) %in% rownames(raw_mouse_ambient)]
+  raw_mouse_ambient <- raw_mouse_ambient[
+    rownames(raw_mouse_ambient) %in% names(exon_fraction_per_feature_2), 
+  ]
+  raw_mouse_ambient <- raw_mouse_ambient[match(names(ef_mouse), rownames(raw_mouse_ambient)), ]
+
+  df_mouse <- data.frame(
+    exon_fraction          = ef_mouse,
+    log_ambient_expression = log1p(rowSums(raw_mouse_ambient)),
+    species                = "mouse"
+  )
+
+  rbind(df_human, df_mouse)
+}
+```
+
+```{r}
+#' Estimate per-cell, per-gene ambient RNA from genotype SNP data
+#'
+#' For a single genotype sample, reads the intermediate SNP calling results
+#' (csc_intermediate.RDS), filters to high-confidence CAST-specific SNPs
+#' (>= 2 supporting reads), and calculates the ambient fraction per unique
+#' gene-in-cell combination as ALT / total reads.
+#'
+#' Used only for the genotype (strain-mixing) dataset.
+#'
+#' @param sample Character. Sample name matching the directory structure
+#'   under data/processed/genotype/genotype_estimation/.
+#'
+#' @return A data frame with columns Barcode, Symbol, Ambient, and Position.
+calc_ambient_from_SNPs <- function(sample) {
+  sample_annotation <- readRDS(here::here(paste0(
+    "data/processed/genotype/genotype_estimation/", sample, "/csc_intermediate.RDS"
+  )))
+
+  # Retain only CAST (Castaneus) strain SNPs
+  sample_annotation <- sample_annotation[sample_annotation$Strain == "CAST", ]
+
+  # Require >= 2 reads for confidence
+  sample_annotation <- sample_annotation[sample_annotation$DP >= 2, ]
+
+  # Keep only rows where reference and alternative allele differ (= ambient)
+  sample_annotation <- sample_annotation[
+    sample_annotation$Strain != sample_annotation$SNPisALT, 
+  ]
+
+  # Match barcode format to Seurat object
+  sample_annotation$cell <- paste(sample_annotation$cell, sample, sep = "_")
+  sample_annotation <- sample_annotation[
+    sample_annotation$cell %in% gen_seu$barcode, 
+  ]
+
+  # Remove SNPs assigned to more than one species in SNPisALT
+  keep <- vapply(seq_len(nrow(sample_annotation)), function(i) {
+    !grepl(sample_annotation$Strain[i], sample_annotation$SNPisALT[i])
+  }, logical(1))
+  sample_annotation <- sample_annotation[keep, ]
+
+  # Calculate ambient fraction per unique gene-in-cell combination
+  sample_annotation$ID <- paste(sample_annotation$cell, sample_annotation$SYMBOL, sep = ":")
+
+  res <- do.call(rbind, lapply(unique(sample_annotation$ID), function(id) {
+    rows  <- sample_annotation[sample_annotation$ID == id, ]
+    cell  <- sub(":.*", "", id)
+    gene  <- sub(".*:", "", id)
+    ALT   <- sum(rows$AD)
+    TOTAL <- sum(rows$DP)
+    data.frame(
+      Barcode  = cell,
+      Symbol   = gene,
+      Ambient  = ALT / TOTAL,
+      Position = rows$position[1]
+    )
+  }))
+
+  return(res)
+}
+```
+
+```{r}
+#' Run ambient or endogenous removal analysis across all tools and species
+#'
+#' For a given dataset and compartment, extracts per-tool corrected counts
+#' for human and mouse cells, computes the fraction of counts removed, saves
+#' per-tool scatter plots, and writes a summary table.
+#'
+#' @param seu A Seurat object containing all decontamination assays.
+#' @param dataset_name Character. Label used in output filenames.
+#' @param compartment Character. Either "ambient" or "endogenous".
+#' @param plot_dir Character. Directory for output PDF plots.
+#' @param table_path Character. File path for the output .xlsx table.
+#'
+#' @return A named list with elements:
+#'   \describe{
+#'     \item{plots}{Named list of ggplot objects.}
+#'     \item{data}{Combined data frame of all tools and species.}
+#'     \item{per_tool_species_dfs}{Per-tool, per-species data frames.}
+#'   }
+run_compartment_removal_analysis <- function(seu,
+                                              dataset_name,
+                                              compartment = c("ambient", "endogenous"),
+                                              plot_dir,
+                                              table_path) {
+  compartment <- match.arg(compartment)
+
+  tools      <- c("CellBender", "CellClear", "FastCAR", "scAR", "scCDC",
+                  "SoupX", "SoupX_r", "DecontX", "DecontX_r")
+  tools_abbr <- c("cb", "cc", "fc", "ar", "cd", "sx", "sxr", "dx", "dxr")
+  tools_map  <- setNames(tools_abbr, tools)
+  input_name <- paste0("input_", compartment)
+
+  # Extract corrected counts for each species
+  corrected <- list(
+    human = divide_ambient_and_endogenous_per_tool(seu = seu, extract = "human"),
+    mouse = divide_ambient_and_endogenous_per_tool(seu = seu, extract = "mouse")
+  )
+
+  # Build per-tool, per-species data frames of fraction removed
+  compartment_dfs <- list()
+  for (species in names(corrected)) {
+    for (tool in tools) {
+      abbr      <- tools_map[[tool]]
+      tool_name <- paste0(abbr, "_", compartment)
+      compartment_dfs[[paste(tool, species, sep = "_")]] <- data.frame(
+        log_UMIs         = log1p(rowSums(corrected[[species]][[input_name]])),
+        fraction_removed = (rowSums(corrected[[species]][[input_name]]) -
+                              rowSums(corrected[[species]][[tool_name]])) /
+          rowSums(corrected[[species]][[input_name]]),
+        species = species
+      )
+    }
+  }
+
+  get_plot_df <- function(tool) {
+    rbind(
+      compartment_dfs[[paste(tool, "human", sep = "_")]],
+      compartment_dfs[[paste(tool, "mouse", sep = "_")]]
+    )
+  }
+
+  # Generate scatter plots
+  plots <- setNames(lapply(seq_along(tools), function(i) {
+    ggplot(get_plot_df(tools[[i]]), aes(x = log_UMIs, y = fraction_removed)) +
+      geom_point_rast(
+        colour    = custom_colors[[i]],
+        size      = 0.5,
+        stroke    = 0,
+        alpha     = 0.5,
+        raster.dpi = 1500
+      ) +
+      plot_theme() +
+      labs(x = NULL, y = NULL) +
+      ylim(-1, 1)
+  }), paste0(dataset_name, "_", compartment, "_removal_", tools))
+
+  # Save plots
+  dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+  for (plot_name in names(plots)) {
+    ggsave(
+      filename = file.path(plot_dir, paste0(plot_name, ".pdf")),
+      plot     = plots[[plot_name]],
+      dpi      = 300,
+      width    = 35,
+      height   = 35,
+      units    = "mm"
+    )
+  }
+
+  # Combine into a single table
+  final_df <- do.call(rbind, lapply(tools, function(tool) {
+    df <- get_plot_df(tool)
+    df$decontamination_method <- tool
+    df
+  }))
+  final_df$dataset    <- dataset_name
+  final_df$compartment <- compartment
+  write_xlsx(final_df, path = table_path)
+
+  list(plots = plots, data = final_df, per_tool_species_dfs = compartment_dfs)
+}
+```
+
+```{r}
+#' Evaluate sample integration quality across decontamination methods
+#'
+#' Used only for the medium and high complexity datasets. For each assay in
+#' `object_list`, runs the Seurat pipeline (optionally with Harmony) and
+#' computes LISI scores across a range of PCA dimensions.
+#'
+#' @param object_list Named list of Seurat objects, one per method.
+#' @param assay Unused placeholder (kept for API compatibility).
+#' @param integrate Logical. Use Harmony integration (default TRUE).
+#' @param min.dim Integer. Minimum dimensions to evaluate (default 5).
+#' @param max.dim Integer. Maximum dimensions to evaluate (default 20).
+#' @param labels Character. Metadata column for cell type labels
+#'   (default "labels").
+#' @param batches Character. Metadata column for batch labels
+#'   (default "orig.ident").
+#'
+#' @return A named list with element `lisi`: a data frame of LISI scores
+#'   across methods and dimensions.
+evaluate_integration <- function(object_list,
+                                  assay,
+                                  integrate = TRUE,
+                                  min.dim   = 5,
+                                  max.dim   = 20,
+                                  labels    = "labels",
+                                  batches   = "orig.ident") {
+  lisi_res     <- as.data.frame(matrix(ncol = 5, nrow = 0))
+  lisi_counter <- 1
+
+  for (dataset in seq_along(object_list)) {
+    DefaultAssay(object_list[[dataset]]) <- names(object_list)[dataset]
+
+    if (names(object_list)[dataset] != "RNA") {
+      object_list[[dataset]][["RNA"]] <- object_list[[dataset]][[names(object_list)[dataset]]]
+    }
+    DefaultAssay(object_list[[dataset]]) <- "RNA"
+
+    new_seu <- NormalizeData(object_list[[dataset]], verbose = FALSE)
+
+    if (integrate) {
+      new_seu_list <- SplitObject(new_seu, split.by = "orig.ident")
+      VariableFeatures(new_seu) <- SelectIntegrationFeatures(new_seu_list, verbose = FALSE)
+    } else {
+      new_seu <- FindVariableFeatures(new_seu, verbose = FALSE)
+    }
+
+    new_seu <- ScaleData(new_seu, verbose = FALSE)
+    new_seu <- RunPCA(new_seu, verbose = FALSE)
+
+    if (integrate) {
+      new_seu <- RunHarmony(new_seu, group.by.vars = "orig.ident", verbose = FALSE)
+    }
+
+    nlabel <- length(unique(new_seu@meta.data[, labels]))
+    nbatch <- length(unique(new_seu@meta.data[, batches]))
+
+    for (i in min.dim:max.dim) {
+      embeddings <- if (integrate) {
+        new_seu@reductions$harmony@cell.embeddings[, 1:i]
+      } else {
+        new_seu@reductions$pca@cell.embeddings[, 1:i]
+      }
+
+      lisi <- compute_lisi(embeddings, new_seu@meta.data,
+                           label_colnames = c("orig.ident", "labels"))
+      lisi[, 1] <- (lisi[, 1] - 1) / (nbatch - 1)
+      lisi[, 2] <- (nlabel - lisi[, 2]) / (nlabel - 1)
+
+      lisi_res[lisi_counter, ] <- list(
+        names(object_list)[dataset],
+        i,
+        ifelse(integrate, "harmony", "pca"),
+        mean(lisi[, 1]),
+        mean(lisi[, 2])
+      )
+      lisi_counter <- lisi_counter + 1
+    }
+  }
+
+  list(lisi = lisi_res)
+}
+```
+
+------------------------------------------------------------------------
+
+# Figure helpers
+
+## Plot theme
+
+```{r}
+#' Base ggplot2 theme for publication figures
+#'
+#' @param fixed_aspect Logical. If TRUE (default), enforces aspect.ratio = 1.
+#'
+#' @return A ggplot2 theme object.
+plot_theme <- function(fixed_aspect = TRUE) {
+  base_theme <- theme(
+    panel.background  = element_rect(fill = "white", colour = NA),
+    plot.background   = element_rect(fill = "white", colour = NA),
+    plot.title        = element_blank(),
+    axis.text.y       = element_text(margin = margin(r = 0.5, unit = "mm")),
+    axis.text.x       = element_text(margin = margin(t = 0.6, unit = "mm")),
+    axis.title.x      = element_text(margin = margin(t = 0.3, unit = "mm")),
+    axis.title.y      = element_text(margin = margin(r = 0.6, unit = "mm")),
+    axis.title        = element_text(size = 7),
+    axis.text         = element_text(size = 5, colour = "black"),
+    axis.line         = element_line(linewidth = 0.4),
+    axis.ticks        = element_line(lineend = "square", linewidth = 0.4, color = "black"),
+    axis.ticks.length = unit(0.5, "mm"),
+    legend.key.size   = unit(0.3, "cm"),
+    legend.title      = element_text(size = 5, margin = margin(l = 1)),
+    legend.text       = element_text(size = 5, margin = margin(l = 1)),
+    legend.position   = "right",
+    legend.box.margin = margin(-15, -15, -15, -15),
+    legend.margin     = margin(0, 0, 0, 0),
+    legend.justification = "left",
+    legend.spacing.x  = unit(0, "mm"),
+    legend.key.width  = unit(1, "mm"),
+    text              = element_text(colour = "black")
+  )
+
+  if (fixed_aspect) base_theme <- base_theme + theme(aspect.ratio = 1)
+  base_theme
+}
+```
+
+## Annotation helper
+
+```{r}
+#' Add text annotation at publication font size
+#'
+#' Thin wrapper around \code{ggplot2::annotate()} that sets the default
+#' size to 5/.pt (approximately 5 pt).
+#'
+#' @param ... Arguments passed to \code{annotate()}.
+#' @param size Numeric. Text size in ggplot units (default 5/.pt).
+general_annotation <- function(..., size = 5 / .pt) {
+  annotate(..., size = size)
+}
+```
+
+## Remove point stroke
+
+```{r}
+#' Remove the stroke from the first layer of a ggplot
+#'
+#' Useful for reducing visual weight of small rasterised points.
+#'
+#' @param figure A ggplot object.
+#'
+#' @return The modified ggplot object.
+remove_stroke <- function(figure) {
+  figure$layers[[1]]$aes_params$stroke <- 0
+  figure
+}
+```
+
+## Axis labels
+
+```{r}
+# Standard UMAP axis labels
+UMAP_labs <- labs(x = "UMAP 1", y = "UMAP 2")
+```
+
+## Legend guides
+
+```{r}
+#' Guide settings for a continuous colour legend
+#'
+#' @param legend_title Character. Legend title (default "Title").
+#' @param barwidth Unit. Width of the colour bar (default 0.2 lines).
+#' @param barheight Numeric. Height of the colour bar (default 4).
+guide_continuous <- function(legend_title = "Title",
+                              barwidth     = unit(0.2, "lines"),
+                              barheight    = 4) {
+  guides(
+    color = guide_colorbar(
+      title          = legend_title,
+      title.position = "left",
+      barwidth       = barwidth,
+      barheight      = barheight,
+      direction      = "vertical",
+      title.hjust    = 0.5,
+      label.theme    = element_text(margin = margin(t = 0, r = 0, b = 0, l = 1)),
+      title.theme    = element_text(angle = 90, vjust = 0.5)
+    )
+  )
+}
+```
+
+```{r}
+#' Guide settings for a discrete colour / fill legend
+#'
+#' @param ncol Integer. Number of legend columns (default 1).
+discrete_guide_settings <- function(ncol = 1) {
+  guide_legend(
+    direction      = "vertical",
+    label.theme    = element_text(margin = margin(r = -3, l = 1), vjust = 0.5),
+    override.aes   = list(size = 1),
+    keyheight      = unit(0.5, "lines"),
+    keywidth       = unit(0.2, "lines"),
+    label.position = "right",
+    label.hjust    = 0,
+    label.vjust    = 0.5,
+    ncol           = ncol
+  )
+}
+
+guide_discrete <- function(ncol = 1) {
+  guides(
+    color = discrete_guide_settings(ncol),
+    fill  = discrete_guide_settings(ncol)
+  )
+}
+```
+
+```{r}
+#' Combined continuous colour + discrete size guide
+#'
+#' @param legend_title Character. Title for the colour bar (default "Title").
+#' @param barwidth Unit. Colour bar width (default 0.2 lines).
+#' @param barheight Numeric. Colour bar height (default 4).
+#' @param size_ncol Integer. Columns for the size legend (default 1).
+guide_combined <- function(legend_title = "Title",
+                            barwidth     = unit(0.2, "lines"),
+                            barheight    = 4,
+                            size_ncol    = 1) {
+  guides(
+    color = guide_colorbar(
+      title          = legend_title,
+      title.position = "left",
+      barwidth       = barwidth,
+      barheight      = barheight,
+      direction      = "vertical",
+      title.hjust    = 0.5,
+      label          = FALSE,
+      label.theme    = element_text(margin = margin(t = 0, r = 0, b = 0, l = 1)),
+      title.theme    = element_text(angle = 90, vjust = 0.5)
+    ),
+    size = guide_legend(
+      direction      = "vertical",
+      label.theme    = element_text(margin = margin(r = -3, l = 1), vjust = 0.5),
+      override.aes   = list(size = 1),
+      label.position = "right",
+      label.hjust    = 0,
+      label.vjust    = 0.5,
+      ncol           = size_ncol
+    )
+  )
+}
+```
+
+## Colour palette
+
+```{r}
+# Colourblind-friendly palette tested across all figures
+custom_colors <- c(
+  "#0D0887",  # deep purple
+  "#ED7953",  # orange
+  "#FDB32F",  # yellow
+  "#81D8D0",  # teal
+  "#C8A2C8",  # lilac
+  "#66C2A5",  # green
+  "#8DA0CB",  # blue-grey
+  "#9C179E",  # magenta
+  "#E78AC3",  # pink
+  "#A6D854",  # lime
+  "#FFD92F",  # bright yellow
+  "#5E4FA2",  # indigo
+  "#3288BD",  # blue
+  "#F46D43",  # coral
+  "#FDAE61",  # light orange
+  "#1A9850"   # dark green
+)
+```

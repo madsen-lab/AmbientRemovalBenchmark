@@ -1,0 +1,116 @@
+---
+title: "00_script_overview"
+format: pdf
+editor: visual
+---
+
+This document gives a brief overview of the numbered scripts that make up the full analysis pipeline. Scripts are designed to be run in order. All file paths use `here::here()` relative to the project root (set by the `.Rproj` file or `here::i_am()`).
+
+------------------------------------------------------------------------
+
+# 01 Dependencies
+
+**File:** `01_dependencies.qmd`
+
+Installation and loading of all R and system packages required by the pipeline. Packages are installed into a project-local library at `dependencies/r_packages/` so the analysis environment is self-contained and does not affect the system R library.
+
+Run this script once when setting up the project for the first time.
+
+------------------------------------------------------------------------
+
+# 02 Functions
+
+**File:** `02_functions.qmd` (documentation) \| `scripts/R/R_files/01_functions.R` (sourceable)
+
+All custom functions used throughout the pipeline, organised by analysis step. The `.qmd` file cannot be sourced directly; the plain `.R` file at `scripts/R/R_files/01_functions.R` is what downstream scripts source via:
+
+``` r
+source(here::here("scripts/R/R_files/01_functions.R"))
+```
+
+Functions are grouped into the following sections:
+
+-   **Preprocessing & QC** — `load_folder()`, `combine_count_matrices()`
+-   **Synthetic data generation** — `generate_dataset()`, `simulate_cells()`, `filter_dataset()`, `fit_models()`, `get_real_sizes()`, `create_count_matrices()`, `get_filtered_barcodes()`, `get_metadata()`
+-   **Running decontamination methods** — `run_decontamination_methods()` (R-based, interactive), `read_H5AD()` (Python output parser), `add_assay()`, memory/timing helpers
+-   **Post-decontamination processing** — `correct_rownames()`, `convert_ensembl_ids_to_gene_names()`, `remove_mito_genes()`, `determine_species_origin()`
+-   **Ambient RNA analysis** — `extract_raw_counts()`, `extract_ambient_counts()`, `extract_endogenous_counts()`, `calc_ambient_load_percentages()`, `calc_avg_ambient_load_percentage()`, `calc_ambient_load_fractions()`, `calc_exon_fraction()`, `match_ambient_load_with_exon_fractions()`, `match_ambient_load_with_exon_fractions_mc()`, `calc_background_profile()`, `get_gene_biotypes()`, `calc_fraction_pc_genes_per_cell()`, `calc_fraction_ribo_genes_per_cell()`, `calc_var_explained_by_cellular_params()`, `calc_var_explained_by_cellular_params_geno()`, `calc_ambient_from_SNPs()`, `calc_qcd()`
+-   **Removal evaluation** — `divide_ambient_and_endogenous_per_tool()`, `get_total_counts_per_tool()`, `make_sparse_subset()`, `make_ambient_subset()`, `calc_endogenous_removal_vs_total_endogenous_UMIs_per_feature()`, `calc_ambient_removal_vs_total_ambient_UMIs_per_feature()`, `run_compartment_removal_analysis()`
+-   **Biology evaluation** — `collectResults()`, `evaluateLabelTransfer()`, `evaluateIntegration()`, `evaluatePerSampleBiology()`, `defineCleanMarkers()`, `evaluateSynthetic()`
+-   **Figure helpers** — `plot_theme()`, `general_annotation()`, `remove_stroke()`, `UMAP_labs`, guide functions, `custom_colors`, plotting functions
+
+------------------------------------------------------------------------
+
+# 03 Download datasets
+
+**File:** `03_download_datasets.qmd`
+
+Retrieves all six datasets used in the study. Bash commands are included for transparency but are marked `eval: false`; they were run once in a terminal. Count matrices are loaded into R, saved as `.Rds` files, and written as `.h5` files for the Python-based decontamination methods. The synthetic dataset is generated in R using the `simmr` / cell-line simulation functions.
+
+Datasets covered:
+
+| \# | Name | Source | Accession |
+|----|----|----|----|
+| 1 | Low complexity | 10x Genomics (20k HGMM) | — |
+| 2 | Medium complexity | Human and mouse islets + spike-ins | GSE147203 |
+| 3 | High complexity | Xenograft islets | GSE207393 |
+| 4 | Genotype | Inbred mouse strains kidney | GSE218853 |
+| 5 | Smart-seq2 | Human islets (plate-based) | E-MTAB-5061 |
+| 6 | Synthetic (with and without ambient) | In-silico (breast cancer cell lines) | GSE173634 |
+
+------------------------------------------------------------------------
+
+# 04 Preprocessing and quality control
+
+**File:** `04_preprocessing_and_quality_control.qmd`
+
+Filters each dataset for cell-containing droplets and low-quality cells:
+
+-   **emptyDrops** (FDR ≤ 0.05) for all droplet-based datasets, with dataset-specific lower UMI thresholds (500, 200, 200, 700 for low, medium, high, genotype, respectively).
+-   **Fixed thresholds** for Smart-seq2 (100,000 – 500,000 counts; 2,500 – 10,500 detected features), since emptyDrops is not applicable to plate-based data.
+-   Filtered count matrices are saved as `.Rds` and `.h5` files.
+
+------------------------------------------------------------------------
+
+# 05 Run methods
+
+**File:** `05_run_methods.qmd`
+
+Applies all seven decontamination methods to each dataset.
+
+**R-based methods** (FastCAR, scCDC, SoupX full/reduced, and DecontX full/reduced) are run via `run_decontamination_methods()`. This function prompts interactively for the number of PCA dimensions and the clustering resolution, after displaying an elbow plot and a clustree / UMAP panel. PDFs of these diagnostic plots are saved to `results/dim_tests/` and `results/res_tests/`.
+
+**Python-based methods** (CellBender, scAR, and CellClear) were run in JupyterLab 4.3.1 using bash scripts in `scripts/bash/`. Their H5/H5AD output files are read back into R with `read_H5AD()` and added to the Seurat objects with `add_assay()`.
+
+All Seurat objects are saved to `data/processed/*/seurat_object/` as `*_seu_before_processing.Rds`.
+
+------------------------------------------------------------------------
+
+# 06 Further preprocessing
+
+**File:** `06_further_preprocessing.qmd`
+
+Post-decontamination processing applied uniformly to all datasets:
+
+1.  Feature name correction (`correct_rownames()`)
+2.  Ensembl ID → gene symbol conversion for the synthetic dataset (`convert_ensembl_ids_to_gene_names()` via `org.Hs.eg.db`)
+3.  Mitochondrial content filtering (`remove_mito_genes()`)
+4.  Metadata addition (genotype strain assignments; synthetic cell type labels)
+5.  Species-of-origin labelling (`determine_species_origin()`)
+6.  Dimensionality reduction and clustering (Seurat pipeline; Harmony for multi-sample datasets)
+
+Final Seurat objects are saved as `*_seu.Rds`.
+
+------------------------------------------------------------------------
+
+# 07 Analysis and figures
+
+**File:** `07_analysis_and_figures.qmd`
+
+All analyses and figure generation:
+
+1.  **Ambient characterisation** — ambient load per cell, variation explained by exon fraction / gene biotype, background expression profiles, between-sample and between-study variability (QCD)
+2.  **Ambient removal evaluation** — per-tool removal of true ambient signal and erroneously removed endogenous signal, summarised as dot plots
+3.  **Biological evaluation** — label transfer (Azimuth), integration quality (LISI, ASW, PCR, ARI, Moran's I, Gini, entropy), per-sample biology (neighbourhood purity, marker gene purity, de novo marker discovery), synthetic ground-truth comparison
+
+All figures are saved to `results/main_figures/` and `results/supplemental_figures/`. Supplemental tables are written to `results/supplemental_tables/` as `.xlsx` files.

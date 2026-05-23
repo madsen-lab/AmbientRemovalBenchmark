@@ -1,0 +1,202 @@
+---
+title: "01_dependencies"
+format: pdf
+editor: visual
+---
+
+Installation and loading of all packages required by the pipeline. Packages are installed into a project-local library at `dependencies/r_packages/` to keep the environment self-contained.
+
+Exact package versions used in the study are recorded in `dependencies/package_versions.csv`.
+
+```{r}
+packages <- read.csv(here::here("dependencies/package_versions.csv"))
+# Install each package at the recorded version via remotes
+remotes::install_version(packages$Package[i], version = packages$Version[i])
+```
+
+Subsequent scripts load packages from this local library via the `.libPaths()` call in the "Add library to path" section below.
+
+------------------------------------------------------------------------
+
+# System dependencies
+
+The following system libraries are required before installing R packages. Run these commands in a terminal (requires sudo on Linux):
+
+```{bash}
+#| eval: false
+sudo apt-get update
+sudo apt-get install -y \
+  bedtools \
+  libhdf5-dev \
+  libhdf5-serial-dev \
+  build-essential \
+  zlib1g-dev \
+  libssl-dev \
+  libssh2-1-dev \
+  libcurl4-openssl-dev \
+  r-base-dev \
+  liblzma-dev \
+  libbz2-dev
+```
+
+------------------------------------------------------------------------
+
+# Create project-local R library
+
+```{r}
+pkg_path <- here::here("dependencies/r_packages")
+dir.create(pkg_path, recursive = TRUE, showWarnings = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# Install R packages
+
+```{r}
+#| eval: false
+#| output: false
+
+# CRAN
+install.packages(c(
+  "BiocManager",
+  "devtools",
+  "remotes",
+  "pheatmap",
+  "qlcMatrix",
+  "aricode",
+  "harmony",
+  "tictoc",
+  "hdf5r",
+  "patchwork",
+  "distances",
+  "spdep",
+  "pcaPP",
+  "clustree",
+  "ggridges",
+  "viridis",
+  "tidyverse",
+  "tidyr",
+  "dplyr",
+  "ggplot2"
+), lib = pkg_path)
+
+# Bioconductor
+BiocManager::install(c(
+  "BiocParallel",
+  "BiocNeighbors",
+  "DropletUtils",
+  "Seurat",
+  "celda",
+  "HGC",
+  "SingleR",
+  "UCell",
+  "scuttle",
+  "scran",
+  "scater",
+  "glmGamPoi",
+  "decontX",
+  "writexl",
+  "orthogene",
+  "org.Hs.eg.db"
+), lib = pkg_path)
+
+# GitHub
+devtools::install_github("satijalab/seurat-data",      lib = pkg_path)
+devtools::install_github("LungCellAtlas/FastCAR",       lib = pkg_path)
+devtools::install_github("ZJU-UoE-CCW-LAB/scCDC",      lib = pkg_path)
+devtools::install_github("wjawaid/enrichR",             lib = pkg_path)
+devtools::install_github("MarioniLab/miloR",            lib = pkg_path)
+devtools::install_github("MarioniLab/miloDE",           lib = pkg_path)
+devtools::install_github("theislab/kBET",               lib = pkg_path)
+devtools::install_github("immunogenomics/presto",       lib = pkg_path)
+devtools::install_github("immunogenomics/lisi",         lib = pkg_path)
+remotes::install_github("satijalab/azimuth", ref = "master", lib = pkg_path)
+
+install.packages("SoupX",    lib = pkg_path)
+install.packages("ggrastr",  lib = pkg_path)
+install.packages("cluster",  lib = pkg_path)
+install.packages("DescTools", lib = pkg_path)
+install.packages("plyr",     lib = pkg_path)
+```
+
+------------------------------------------------------------------------
+
+# Save package versions
+
+```{r}
+installed <- as.data.frame(installed.packages(lib.loc = here::here("dependencies/r_packages")))
+write.csv(installed[, c("Package", "Version")], 
+          here::here("dependencies/package_versions.csv"), 
+          row.names = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# Add library to path
+
+Add the project-local library to the search path. This line should be run at the start of every session (it is called automatically by sourcing `scripts/R/R_files/01_functions.R`).
+
+```{r}
+.libPaths(c(here::here("dependencies/r_packages"), .libPaths()))
+```
+
+------------------------------------------------------------------------
+
+# Load libraries
+
+```{r}
+#| message: false
+#| warning: false
+library(here)
+library(Matrix)
+library(Seurat)
+library(SeuratObject)
+library(SeuratData)
+library(FastCAR)
+library(scCDC)
+library(SoupX)
+library(ComplexHeatmap)
+library(circlize)
+library(HGC)
+library(aricode)
+library(lisi)
+library(SingleR)
+library(scuttle)
+library(BiocParallel)
+library(BiocNeighbors)
+library(scran)
+library(scater)
+library(qlcMatrix)
+library(viridis)
+library(DropletUtils)
+library(patchwork)
+library(harmony)
+library(ggridges)
+library(decontX)
+library(tictoc)
+library(glmGamPoi)
+library(hdf5r)
+library(rhdf5)
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(presto)
+library(miloDE)
+library(miloR)
+library(distances)
+library(cluster)
+library(Azimuth)
+library(kBET)
+library(DescTools)
+library(plyr)
+library(writexl)
+library(ggrastr)
+library(clustree)
+library(orthogene)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(spdep)
+library(pcaPP)
+library(UCell)
+```

@@ -1,0 +1,475 @@
+---
+title: "05_run_methods"
+format: pdf
+editor: visual
+editor_options:
+  chunk_output_type: console
+---
+
+R-based methods (FastCAR, scCDC, DecontX, SoupX) are run here via `run_decontamination_methods()`. Python-based methods (CellBender, scAR, CellClear) were run separately in JupyterLab 4.3.1 using bash scripts located in `scripts/bash/` and their outputs are read in here.
+
+All methods are run with default parameters **except** Smart-seq2 and the synthetic datasets, where empty-droplet boundaries are set explicitly (see notes per dataset below).
+
+------------------------------------------------------------------------
+
+# Load data
+
+## Low complexity
+
+```{r}
+lc_count_matrix <- readRDS(here::here("data/raw/low_complexity/count_matrix/lc_count_matrix.Rds"))
+lc_barcodes_post_ed <- readRDS(here::here("data/processed/low_complexity/emptyDrops_filtered/rds-files/low_complexity_barcodes_post_emptyDrops.Rds"))
+```
+
+## Medium complexity
+
+```{r}
+mc_human_count_matrices <- readRDS(here::here("data/raw/medium_complexity/count_matrices/mc_human_count_matrices.Rds"))
+mc_human_barcodes_post_ed <- readRDS(here::here("data/processed/medium_complexity/emptyDrops_filtered/rds-files/medium_complexity_human_barcodes_post_ed.Rds"))
+
+mc_mouse_count_matrices <- readRDS(here::here("data/raw/medium_complexity/count_matrices/mc_mouse_count_matrices.Rds"))
+mc_mouse_barcodes_post_ed <- readRDS(here::here("data/processed/medium_complexity/emptyDrops_filtered/rds-files/medium_complexity_mouse_barcodes_post_ed.Rds"))
+```
+
+## High complexity
+
+```{r}
+hc_count_matrices <- readRDS(here::here("data/raw/high_complexity/count_matrices/hc_count_matrices.Rds"))
+hc_barcodes_post_ed <- readRDS(here::here("data/processed/high_complexity/emptyDrops_filtered/rds-files/high_complexity_barcodes_post_ed.Rds"))
+```
+
+## Genotype
+
+```{r}
+gen_count_matrices <- readRDS(here::here("data/raw/genotype/count_matrices/gen_count_matrices.Rds"))
+gen_barcodes_post_ed <- readRDS(here::here("data/processed/genotype/emptyDrops_filtered/rds-files/genotype_barcodes_post_ed.Rds"))
+```
+
+## Smart-seq2
+
+```{r}
+smart_count_matrices <- readRDS(here::here("data/raw/smart-seq2/count_matrices/smart_count_matrices.Rds"))
+smart_barcodes_post_filtering <- readRDS(here::here("data/processed/smart-seq2/filtered/rds-files/smart_barcodes_post_filtering.Rds"))
+```
+
+## Synthetic
+
+```{r}
+synt_count_matrices <- readRDS(here::here("data/raw/synthetic/count_matrices/synt_count_matrices.Rds"))
+synt_filtered_barcodes <- readRDS(here::here("data/processed/synthetic/filtered/rds-files/synt_filtered_barcodes.Rds"))
+
+synt_wo_ambient_count_matrices <- readRDS(here::here("data/raw/synthetic/count_matrices/synt_count_matrices_wo_ambient.Rds"))
+synt_wo_ambient_filtered_barcodes <- readRDS(here::here("data/processed/synthetic/filtered/rds-files/synt_wo_ambient_filtered_barcodes.Rds"))
+```
+
+------------------------------------------------------------------------
+
+# Run R-based decontamination methods
+
+Dimensions and resolution for clustering are chosen interactively from clustree and UMAP plots and are noted per dataset below. The chosen values are also stored in `seu@misc` of each resulting Seurat object.
+
+## Low complexity
+
+Only two clusters are expected (human and mouse cell lines). SoupX cannot run on exactly two clusters, so resolution is set to 0.1 despite the clustree suggesting 0.01 that would recover the true two clusters.
+
+Dimensions: 10 \| Resolution: 0.1
+
+```{r}
+lc_seu <- run_decontamination_methods(
+  counts = list(Barnyard = lc_count_matrix),
+  barcodes = list(Barnyard = lc_barcodes_post_ed),
+  resolutions = c(0.01, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2),
+  dataset_name = "low_complexity"
+)
+rm(lc_count_matrix, lc_barcodes_post_ed)
+```
+
+## Medium complexity
+
+Approximately nine clusters are expected. scCDC cannot run with resolution ≤ 0.1, so resolution is set to 0.2.
+
+### Human samples
+
+Dimensions: 10 \| Resolution: 0.2
+
+```{r}
+mc_human_seu <- run_decontamination_methods(
+  counts = mc_human_count_matrices,
+  barcodes = mc_human_barcodes_post_ed,
+  resolutions = c(0.1, 0.2, 0.3, 0.4, 0.5),
+  dataset_name = "medium_complexity_human"
+)
+rm(mc_human_count_matrices, mc_human_barcodes_post_ed)
+```
+
+### Mouse samples
+
+Dimensions: 10 \| Resolution: 0.2
+
+```{r}
+mc_mouse_seu <- run_decontamination_methods(
+  counts = mc_mouse_count_matrices,
+  barcodes = mc_mouse_barcodes_post_ed,
+  resolutions = c(0.1, 0.2, 0.3, 0.4, 0.5),
+  dataset_name = "medium_complexity_mouse"
+)
+rm(mc_mouse_count_matrices, mc_mouse_barcodes_post_ed)
+```
+
+## High complexity
+
+Dimensions: 15 \| Resolution: 0.4
+
+```{r}
+hc_seu <- run_decontamination_methods(
+  counts = hc_count_matrices,
+  barcodes = hc_barcodes_post_ed,
+  resolutions = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+  dataset_name = "high_complexity"
+)
+rm(hc_count_matrices, hc_barcodes_post_ed)
+```
+
+## Genotype
+
+The original article identified 11 clusters. Dimensions: 15 \| Resolution: 0.3
+
+```{r}
+gen_seu <- run_decontamination_methods(
+  counts = gen_count_matrices,
+  barcodes = gen_barcodes_post_ed,
+  resolutions = c(0.1, 0.2, 0.3, 0.4, 0.5),
+  empty_cutoff_upper = 20000,
+  empty_cutoff_lower = 0,
+  dataset_name = "genotype"
+)
+rm(gen_count_matrices, gen_barcodes_post_ed)
+```
+
+## Smart-seq2
+
+plate-based data has no empty droplets, so empty-droplet boundaries are set using the observed UMI range of non-cell wells.
+
+Empty droplet UMI range: 1,000 – 100,000 Dimensions: 10 \| Resolution: 0.3
+
+```{r}
+smart_seu <- run_decontamination_methods(
+  counts = smart_count_matrices,
+  barcodes = smart_barcodes_post_filtering,
+  resolutions = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+  empty_cutoff_upper = 100000,
+  empty_cutoff_lower = 1000,
+  dataset_name = "smart-seq2"
+)
+rm(smart_count_matrices, smart_barcodes_post_filtering)
+```
+
+## Synthetic
+
+The contents of each droplet are known, so empty-droplet boundaries are set between the highest empty droplet and lowest real cell.
+
+### Inspect UMI distributions
+
+```{r}
+# Load simulation objects for boundary inspection
+synt_simulations <- list()
+for (sample in synt_samples) {
+  synt_simulations[[sample]] <- readRDS(here::here(paste0(
+    "data/raw/synthetic/dataset_R_objects_full/", sample, ".Rds"
+  )))
+}
+
+# Minimum UMIs in cell-containing droplets (with ambient)
+sapply(synt_simulations, function(s) min(colSums(s$real_counts) + colSums(s$real_ambient)))
+
+# Maximum UMIs in surely empty droplets
+sapply(synt_simulations, function(s) max(colSums(s$empty)))
+
+# Barcode rank plots
+for (sample in names(synt_count_matrices)) {
+  br_out <- barcodeRanks(synt_count_matrices[[sample]])
+  plot(br_out$rank, br_out$total, log = "xy", main = sample)
+}
+```
+
+### With ambient RNA
+
+Empty droplet UMI range: 0 – 1,000 Dimensions: 4 \| Resolution: 0.07
+
+```{r}
+synt_seu <- run_decontamination_methods(
+  counts = synt_count_matrices,
+  barcodes = synt_filtered_barcodes,
+  resolutions = c(0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.15, 0.2),
+  empty_cutoff_upper = 1000,
+  empty_cutoff_lower = 0,
+  dataset_name = "synthetic"
+)
+rm(synt_count_matrices, synt_filtered_barcodes)
+```
+
+### Without ambient RNA
+
+Empty droplet UMI range: 0 – 500
+
+```{r}
+# Minimum UMIs in cell-containing droplets (without ambient)
+sapply(synt_simulations, function(s) min(colSums(s$real_counts)))
+
+# Maximum UMIs in surely empty droplets
+sapply(synt_simulations, function(s) max(colSums(s$empty)))
+
+for (sample in names(synt_wo_ambient_count_matrices)) {
+  br_out <- barcodeRanks(synt_wo_ambient_count_matrices[[sample]])
+  plot(br_out$rank, br_out$total, log = "xy", main = sample)
+}
+```
+
+Dimensions: 4 \| Resolution: 0.03
+
+```{r}
+synt_seu_wo_ambient <- run_decontamination_methods(
+  counts = synt_wo_ambient_count_matrices,
+  barcodes = synt_wo_ambient_filtered_barcodes,
+  resolutions = c(0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1),
+  empty_cutoff_upper = 500,
+  empty_cutoff_lower = 0,
+  dataset_name = "synthetic_wo_ambient"
+)
+rm(synt_wo_ambient_count_matrices, synt_wo_ambient_filtered_barcodes)
+```
+
+------------------------------------------------------------------------
+
+# Add Python-based methods
+
+CellBender, scAR, and CellClear were run via JupyterLab 4.3.1. Bash scripts are in `scripts/bash/run_CellBender.sh`, `run_scAR.sh`, and `run_CellClear.sh`. Outputs are read here using `read_H5AD()` and added to the Seurat objects with `add_assay()`.
+
+## Low complexity
+
+```{r}
+cb <- read_H5AD(here::here("data/processed/low_complexity/CellBender/low_complexity_post_CellBender_filtered.h5"), type = "CellBender", name = "Barnyard")
+scar <- read_H5AD(here::here("data/processed/low_complexity/scAR/low_complexity_post_scAR.h5ad/filtered_feature_bc_matrix_denoised_mRNA.h5ad"), type = "scAR",       name = "Barnyard")
+cc <- read_H5AD(here::here("data/processed/low_complexity/CellClear/counts.h5ad"), type = "CellClear",  name = "Barnyard")
+
+lc_seu <- add_assay(lc_seu, list(cb),   "CellBender")
+lc_seu <- add_assay(lc_seu, list(scar), "scAR")
+lc_seu <- add_assay(lc_seu, list(cc),   "CellClear")
+rm(cb, scar, cc)
+```
+
+## Medium complexity — human samples
+
+```{r}
+cb_list <- list()
+scar_list <- list()
+cc_list <- list()
+
+for (SRR in mc_human_samples) {
+  cb_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/medium_complexity/CellBender/", SRR, "/", SRR, "_post_CellBender_filtered.h5")), type = "CellBender", name = SRR)
+  scar_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/medium_complexity/scAR/", SRR, "/", SRR, "_post_scAR.h5/filtered_feature_bc_matrix_denoised_mRNA.h5ad")), type = "scAR",       name = SRR)
+  cc_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/medium_complexity/CellClear/", SRR, "/counts.h5ad")), type = "CellClear",  name = SRR)
+}
+
+mc_human_seu <- add_assay(mc_human_seu, cb_list, "CellBender")
+mc_human_seu <- add_assay(mc_human_seu, scar_list, "scAR")
+mc_human_seu <- add_assay(mc_human_seu, cc_list, "CellClear")
+rm(cb_list, scar_list, cc_list)
+```
+
+## Medium complexity — mouse samples
+
+```{r}
+cb_list <- list()
+scar_list <- list()
+cc_list <- list()
+
+for (SRR in mc_mouse_samples) {
+  cb_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/medium_complexity/CellBender/", SRR, "/", SRR, "_post_CellBender_filtered.h5")), type = "CellBender", name = SRR)
+  scar_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/medium_complexity/scAR/", SRR, "/", SRR, "_post_scAR.h5/filtered_feature_bc_matrix_denoised_mRNA.h5ad")), type = "scAR",       name = SRR)
+  cc_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/medium_complexity/CellClear/",  SRR, "/counts.h5ad")), type = "CellClear", name = SRR)
+}
+
+mc_mouse_seu <- add_assay(mc_mouse_seu, cb_list, "CellBender")
+mc_mouse_seu <- add_assay(mc_mouse_seu, scar_list, "scAR")
+mc_mouse_seu <- add_assay(mc_mouse_seu, cc_list, "CellClear")
+rm(cb_list, scar_list, cc_list)
+```
+
+## High complexity
+
+```{r}
+cb_list <- list()
+scar_list <- list()
+cc_list <- list()
+
+for (SRR in hc_samples) {
+  cb_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/high_complexity/CellBender/", SRR, "/", SRR, "_post_CellBender_filtered.h5")), type = "CellBender", name = SRR)
+  scar_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/high_complexity/scAR/", SRR, "/", SRR, "_post_scAR.h5ad/filtered_feature_bc_matrix_denoised_mRNA.h5ad")), type = "scAR", name = SRR)
+  cc_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/high_complexity/CellClear/",  SRR, "/counts.h5ad")), type = "CellClear", name = SRR)
+}
+
+hc_seu <- add_assay(hc_seu, cb_list, "CellBender")
+hc_seu <- add_assay(hc_seu, scar_list, "scAR")
+hc_seu <- add_assay(hc_seu, cc_list, "CellClear")
+rm(cb_list, scar_list, cc_list)
+```
+
+## Genotype
+
+```{r}
+cb_list <- list()
+scar_list <- list()
+cc_list <- list()
+
+for (SRR in gen_samples) {
+  cb_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/genotype/CellBender/", SRR, "/", SRR, "_post_CellBender_filtered.h5")), type = "CellBender", name = SRR)
+  scar_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/genotype/scAR/", SRR, "/", SRR, "_post_scAR.h5ad/filtered_feature_bc_matrix_denoised_mRNA.h5ad")), type = "scAR", name = SRR)
+  cc_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/genotype/CellClear/",  SRR, "/counts.h5ad")), type = "CellClear",  name = SRR)
+}
+
+gen_seu <- add_assay(gen_seu, cb_list, "CellBender")
+gen_seu <- add_assay(gen_seu, scar_list, "scAR")
+gen_seu <- add_assay(gen_seu, cc_list, "CellClear")
+rm(cb_list, scar_list, cc_list)
+```
+
+## Smart-seq2
+
+CellClear returns a standard matrix folder for Smart-seq2 rather than H5AD.
+
+```{r}
+cb_list <- list()
+scar_list <- list()
+cc_list <- list()
+
+for (SRR in smart_samples) {
+  cb_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/smart-seq2/CellBender/", SRR, "/", SRR, "_post_CellBender_filtered.h5")), type = "CellBender", name = SRR)
+  scar_list[[SRR]] <- read_H5AD(here::here(paste0("data/processed/smart-seq2/scAR/",       SRR, "/", SRR, "_post_scAR.h5ad/filtered_feature_bc_matrix_denoised_mRNA.h5ad")), type = "scAR", name = SRR)
+  cc_mat <- load_folder(here::here(paste0("data/processed/smart-seq2/CellClear/", SRR, "/matrix")))
+  colnames(cc_mat) <- paste0(colnames(cc_mat), "_", SRR)
+  cc_list[[SRR]] <- cc_mat
+}
+
+smart_seu <- add_assay(smart_seu, cb_list, "CellBender")
+smart_seu <- add_assay(smart_seu, scar_list, "scAR")
+smart_seu <- add_assay(smart_seu, cc_list, "CellClear")
+rm(cb_list, scar_list, cc_list)
+```
+
+## Synthetic — with ambient RNA
+
+```{r}
+cb_list <- list()
+scar_list <- list()
+cc_list <- list()
+
+for (sample in synt_samples) {
+  cb_list[[sample]] <- read_H5AD(here::here(paste0("data/processed/synthetic/CellBender/normal/expected_cells_parameter/", sample, "/", sample, "_post_CellBender_with_expected_cells_filtered.h5")), type = "CellBender", name = sample)
+  scar_list[[sample]] <- read_H5AD(here::here(paste0("data/processed/synthetic/scAR/normal/", sample, "/", sample, "_post_scAR.h5ad/filtered_feature_bc_matrix_denoised_mRNA.h5ad")), type = "scAR", name = sample)
+  cc_mat <- load_folder(here::here(paste0("data/processed/synthetic/CellClear/normal/umi_parameters/", sample, "/matrix")))
+  colnames(cc_mat) <- paste0(colnames(cc_mat), "_", sample)
+  cc_list[[sample]] <- cc_mat
+}
+
+synt_seu <- add_assay(synt_seu, cb_list, "CellBender")
+synt_seu <- add_assay(synt_seu, scar_list, "scAR")
+synt_seu <- add_assay(synt_seu, cc_list, "CellClear")
+rm(cb_list, scar_list, cc_list)
+```
+
+## Synthetic — without ambient RNA
+
+```{r}
+cb_list <- list()
+scar_list <- list()
+cc_list <- list()
+
+for (sample in synt_samples) {
+  cb_list[[sample]] <- read_H5AD(here::here(paste0("data/processed/synthetic/CellBender/wo_ambient/expected_cells_parameter/", sample, "/", sample, "_wo_ambient_post_CellBender_with_expected_cells_filtered.h5")), type = "CellBender", name = sample)
+  scar_list[[sample]] <- read_H5AD(here::here(paste0("data/processed/synthetic/scAR/wo_ambient/", sample, "/", sample, "_post_scAR.h5ad/filtered_feature_bc_matrix_denoised_mRNA.h5ad")),   type = "scAR", name = sample)
+  cc_mat <- load_folder(here::here(paste0("data/processed/synthetic/CellClear/wo_ambient/umi_parameters/", sample, "/matrix")))
+  colnames(cc_mat) <- paste0(colnames(cc_mat), "_", sample)
+  cc_list[[sample]] <- cc_mat
+}
+
+synt_seu_wo_ambient <- add_assay(synt_seu_wo_ambient, cb_list, "CellBender")
+synt_seu_wo_ambient <- add_assay(synt_seu_wo_ambient, scar_list, "scAR")
+synt_seu_wo_ambient <- add_assay(synt_seu_wo_ambient, cc_list, "CellClear")
+rm(cb_list, scar_list, cc_list)
+```
+
+------------------------------------------------------------------------
+
+# Save Seurat objects
+
+```{r}
+saveRDS(lc_seu,          here::here("data/processed/low_complexity/seurat_object/lc_seu_before_processing.Rds"))
+saveRDS(mc_human_seu,    here::here("data/processed/medium_complexity/seurat_object/mc_human_seu_before_processing.Rds"))
+saveRDS(mc_mouse_seu,    here::here("data/processed/medium_complexity/seurat_object/mc_mouse_seu_before_processing.Rds"))
+saveRDS(hc_seu,          here::here("data/processed/high_complexity/seurat_object/hc_seu_before_processing.Rds"))
+saveRDS(gen_seu,         here::here("data/processed/genotype/seurat_object/gen_seu_before_processing.Rds"))
+saveRDS(smart_seu,       here::here("data/processed/smart-seq2/seurat_object/smart_seu_before_processing.Rds"))
+saveRDS(synt_seu,        here::here("data/processed/synthetic/seurat_object/synt_seu_before_processing.Rds"))
+saveRDS(synt_seu_wo_ambient, here::here("data/processed/synthetic/seurat_object/synt_seu_wo_ambient_before_processing.Rds"))
+```
+
+------------------------------------------------------------------------
+
+# Memory profiling inputs (supplementary)
+
+The code below saves the intermediate matrices used to profile peak memory consumption of each decontamination method on the low complexity dataset. This is only needed when reproducing the memory benchmarking results.
+
+```{r}
+#| eval: false
+
+# Re-run the setup steps to obtain the pre-method matrices
+lc_count_matrix <- readRDS(here::here("data/raw/low_complexity/count_matrix/lc_count_matrix.Rds"))
+lc_barcodes_post_ed <- readRDS(here::here("data/processed/low_complexity/emptyDrops_filtered/rds-files/low_complexity_barcodes_post_emptyDrops.Rds"))
+
+counts <- list(Barnyard = lc_count_matrix)
+barcodes <- list(Barnyard = lc_barcodes_post_ed)
+
+colnames(counts[[1]]) <- paste(colnames(counts[[1]]),  "Barnyard", sep = "_")
+barcodes[[1]] <- paste(barcodes[[1]], "Barnyard", sep = "_")
+
+subset_mat <- counts[[1]][, colnames(counts[[1]]) %in% barcodes[[1]]]
+subset_mat <- subset_mat[Matrix::rowSums(subset_mat) >= 1, ]
+rownames(subset_mat) <- make.unique(rownames(subset_mat))
+
+seu_tmp <- suppressWarnings(CreateSeuratObject(subset_mat, project = "Barnyard",
+                                               min.cells = 0, min.features = 0))
+seu_tmp@meta.data$barcode <- colnames(subset_mat)
+seu_tmp <- subset(seu_tmp, cells = rownames(seu_tmp@meta.data)[seu_tmp$nFeature_RNA >= 200])
+seu_tmp <- subset(seu_tmp, features = names(which(rowSums(seu_tmp@assays$RNA$counts > 0) >= 3)))
+
+seu_tmp <- NormalizeData(seu_tmp, verbose = FALSE)
+seu_tmp <- FindVariableFeatures(seu_tmp, verbose = FALSE)
+seu_tmp <- ScaleData(seu_tmp, features = rownames(seu_tmp), verbose = FALSE)
+seu_tmp <- RunPCA(seu_tmp, verbose = FALSE)
+seu_tmp <- FindNeighbors(seu_tmp, dims = 1:10, verbose = FALSE)
+seu_tmp <- FindClusters(seu_tmp, resolution = 0.1, verbose = FALSE)
+
+filt_matrix <- seu_tmp@assays$RNA$counts
+colnames(filt_matrix) <- seu_tmp$barcode
+
+raw_matrix <- counts[[1]]
+rownames(raw_matrix) <- gsub("_", "-", rownames(raw_matrix))
+raw_matrix <- raw_matrix[!duplicated(rownames(raw_matrix)), ]
+rownames(filt_matrix) <- gsub("_", "-", rownames(filt_matrix))
+filt_matrix <- filt_matrix[!duplicated(rownames(filt_matrix)), ]
+filt_matrix <- filt_matrix[rownames(filt_matrix) %in% rownames(raw_matrix), ]
+raw_matrix <- raw_matrix[rownames(raw_matrix) %in% rownames(filt_matrix), ]
+filt_matrix <- filt_matrix[match(rownames(raw_matrix), rownames(filt_matrix)), ]
+
+clusters <- data.frame(barcode = seu_tmp$barcode, cluster = seu_tmp$seurat_clusters)
+clusters <- clusters[match(colnames(filt_matrix), clusters$barcode), ]
+
+dir.create(here::here("data/for_time_and_memory_tracking"), recursive = TRUE, showWarnings = FALSE)
+saveRDS(raw_matrix, here::here("for_time_and_memory_tracking/lc_raw_matrix.Rds"))
+saveRDS(filt_matrix, here::here("for_time_and_memory_tracking/lc_filt_matrix.Rds"))
+saveRDS(clusters, here::here("for_time_and_memory_tracking/lc_clusters.Rds"))
+saveRDS(list(seu_tmp), here::here("for_time_and_memory_tracking/lc_seu_list.Rds"))
+
+rm(seu_tmp, filt_matrix, raw_matrix, clusters, subset_mat)
+```

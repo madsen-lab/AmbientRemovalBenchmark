@@ -1,0 +1,358 @@
+---
+title: "04_preprocessing_and_quality_control"
+format: pdf
+editor: visual
+---
+
+All count matrices are filtered for cell-containing droplets and low-quality cells. emptyDrops (FDR ≤ 0.05) is used for all droplet-based datasets; Smart-seq2 is filtered manually using fixed count and feature thresholds (emptyDrops is not applicable to plate-based data). CellBender performs its own filtering internally, so only the raw matrices are passed to it.
+
+------------------------------------------------------------------------
+
+# Create output directory structure
+
+```{r}
+main_dir <- here::here()
+
+dir.create(file.path(main_dir, "data/processed/low_complexity/emptyDrops_filtered/rds-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/low_complexity/emptyDrops_filtered/h5-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/medium_complexity/emptyDrops_filtered/rds-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/medium_complexity/emptyDrops_filtered/h5-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/high_complexity/emptyDrops_filtered/rds-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/high_complexity/emptyDrops_filtered/h5-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/genotype/emptyDrops_filtered/rds-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/genotype/emptyDrops_filtered/h5-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/smart-seq2/filtered/rds-files"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/smart-seq2/filtered/h5-files"),        recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/synthetic/filtered/rds-files"),        recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/processed/synthetic/filtered/h5-files"),         recursive = TRUE, showWarnings = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# Load count matrices
+
+```{r}
+lc_count_matrix <- readRDS(here::here("data/raw/low_complexity/count_matrix/lc_count_matrix.Rds"))
+mc_human_count_matrices <- readRDS(here::here("data/raw/medium_complexity/count_matrices/mc_human_count_matrices.Rds"))
+mc_mouse_count_matrices <- readRDS(here::here("data/raw/medium_complexity/count_matrices/mc_mouse_count_matrices.Rds"))
+hc_count_matrices <- readRDS(here::here("data/raw/high_complexity/count_matrices/hc_count_matrices.Rds"))
+gen_count_matrices <- readRDS(here::here("data/raw/genotype/count_matrices/gen_count_matrices.Rds"))
+smart_count_matrices <- readRDS(here::here("data/raw/smart-seq2/count_matrices/smart_count_matrices.Rds"))
+```
+
+------------------------------------------------------------------------
+
+# Quality control
+
+## Low complexity
+
+emptyDrops lower UMI threshold set to 500 (single-sample dataset).
+
+```{r}
+set.seed(100)
+
+lc_ed <- as.data.frame(DropletUtils::emptyDrops(m = lc_count_matrix, lower = 500))
+lc_ed <- lc_ed[!is.na(lc_ed$FDR), ]
+
+# Cell barcodes passing FDR <= 0.05
+lc_barcodes_post_ed <- rownames(lc_ed[lc_ed$FDR <= 0.05, ])
+
+saveRDS(lc_barcodes_post_ed, file = here::here("data/processed/low_complexity/emptyDrops_filtered/rds-files/low_complexity_barcodes_post_emptyDrops.Rds"))
+
+# Filtered matrix for Python-based methods
+lc_filtered <- lc_count_matrix[, colnames(lc_count_matrix) %in% lc_barcodes_post_ed]
+lc_filtered <- lc_filtered[rowSums(lc_filtered) > 0, ]
+
+write10xCounts(
+  here::here("data/processed/low_complexity/emptyDrops_filtered/h5-files/low_complexity_post_emptyDrops.h5"),
+  lc_filtered,
+  barcodes = colnames(lc_filtered),
+  gene.id = rownames(lc_filtered),
+  gene.symbol = rownames(lc_filtered),
+  gene.type = "Gene Expression",
+  overwrite = TRUE,
+  type = "HDF5",
+  genome = "unknown",
+  version = "3",
+  chemistry = "Single Cell 3' v2",
+  original.gem.groups = 1L,
+  library.ids = "custom"
+)
+```
+
+## Medium complexity
+
+emptyDrops lower UMI threshold set to 200 for all medium complexity samples.
+
+### Human samples
+
+```{r}
+mc_human_barcodes_post_ed <- list()
+mc_human_filtered_matrices <- list()
+
+for (i in seq_along(mc_human_count_matrices)) {
+  set.seed(100)
+
+  ed <- as.data.frame(DropletUtils::emptyDrops(
+    m = mc_human_count_matrices[[i]], lower = 200
+  ))
+  ed <- ed[!is.na(ed$FDR), ]
+
+  mc_human_barcodes_post_ed[[i]] <- rownames(ed[ed$FDR <= 0.05, ])
+  names(mc_human_barcodes_post_ed)[i] <- mc_human_samples[i]
+
+  saveRDS(mc_human_barcodes_post_ed[[i]], here::here(paste0(
+    "data/processed/medium_complexity/emptyDrops_filtered/rds-files/",
+    mc_human_samples[i], "_barcodes_post_emptyDrops.Rds"
+  )))
+
+  # Filtered matrix for Python-based methods
+  mat <- mc_human_count_matrices[[i]]
+  mat <- mat[, colnames(mat) %in% mc_human_barcodes_post_ed[[i]]]
+  mat <- mat[rowSums(mat) > 0, ]
+  mc_human_filtered_matrices[[i]] <- mat
+
+  write10xCounts(
+    here::here(paste0(
+      "data/processed/medium_complexity/emptyDrops_filtered/h5-files/",
+      mc_human_samples[i], "_post_emptyDrops.h5"
+    )),
+    mat,
+    barcodes = colnames(mat),
+    gene.id = rownames(mat),
+    gene.symbol = rownames(mat),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Single Cell 3' v2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+
+  message("Done: ", mc_human_samples[i])
+}
+
+saveRDS(mc_human_barcodes_post_ed, file = here::here("data/processed/medium_complexity/emptyDrops_filtered/rds-files/medium_complexity_human_barcodes_post_ed.Rds"))
+```
+
+### Mouse samples
+
+```{r}
+mc_mouse_barcodes_post_ed <- list()
+mc_mouse_filtered_matrices <- list()
+
+for (i in seq_along(mc_mouse_count_matrices)) {
+  set.seed(100)
+
+  ed <- as.data.frame(DropletUtils::emptyDrops(
+    m = mc_mouse_count_matrices[[i]], lower = 200
+  ))
+  ed <- ed[!is.na(ed$FDR), ]
+
+  mc_mouse_barcodes_post_ed[[i]] <- rownames(ed[ed$FDR <= 0.05, ])
+  names(mc_mouse_barcodes_post_ed)[i] <- mc_mouse_samples[i]
+
+  saveRDS(mc_mouse_barcodes_post_ed[[i]], here::here(paste0(
+    "data/processed/medium_complexity/emptyDrops_filtered/rds-files/",
+    mc_mouse_samples[i], "_barcodes_post_emptyDrops.Rds"
+  )))
+
+  mat <- mc_mouse_count_matrices[[i]]
+  mat <- mat[, colnames(mat) %in% mc_mouse_barcodes_post_ed[[i]]]
+  mat <- mat[rowSums(mat) > 0, ]
+  mc_mouse_filtered_matrices[[i]] <- mat
+
+  write10xCounts(
+    here::here(paste0(
+      "data/processed/medium_complexity/emptyDrops_filtered/h5-files/",
+      mc_mouse_samples[i], "_post_emptyDrops.h5"
+    )),
+    mat,
+    barcodes = colnames(mat),
+    gene.id = rownames(mat),
+    gene.symbol = rownames(mat),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Single Cell 3' v2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+
+  message("Done: ", mc_mouse_samples[i])
+}
+
+saveRDS(mc_mouse_barcodes_post_ed, file = here::here("data/processed/medium_complexity/emptyDrops_filtered/rds-files/medium_complexity_mouse_barcodes_post_ed.Rds"))
+```
+
+## High complexity
+
+emptyDrops lower UMI threshold set to 200.
+
+```{r}
+hc_barcodes_post_ed <- list()
+hc_filtered_matrices <- list()
+
+for (i in seq_along(hc_count_matrices)) {
+  set.seed(100)
+
+  ed <- as.data.frame(DropletUtils::emptyDrops(
+    m = hc_count_matrices[[i]], lower = 200
+  ))
+  ed <- ed[!is.na(ed$FDR), ]
+
+  hc_barcodes_post_ed[[i]] <- rownames(ed[ed$FDR <= 0.05, ])
+  names(hc_barcodes_post_ed)[i] <- hc_samples[i]
+
+  saveRDS(hc_barcodes_post_ed[[i]], here::here(paste0(
+    "data/processed/high_complexity/emptyDrops_filtered/rds-files/",
+    hc_samples[i], "_barcodes_post_emptyDrops.Rds"
+  )))
+
+  mat <- hc_count_matrices[[i]]
+  mat <- mat[, colnames(mat) %in% hc_barcodes_post_ed[[i]]]
+  mat <- mat[rowSums(mat) > 0, ]
+  hc_filtered_matrices[[i]] <- mat
+
+  write10xCounts(
+    here::here(paste0(
+      "data/processed/high_complexity/emptyDrops_filtered/h5-files/",
+      hc_samples[i], "_post_emptyDrops.h5"
+    )),
+    mat,
+    barcodes = colnames(mat),
+    gene.id = rownames(mat),
+    gene.symbol = rownames(mat),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Single Cell 3' v2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+
+  message("Done: ", hc_samples[i])
+}
+
+saveRDS(hc_barcodes_post_ed, file = here::here("data/processed/high_complexity/emptyDrops_filtered/rds-files/high_complexity_barcodes_post_ed.Rds"))
+```
+
+## Genotype
+
+emptyDrops lower UMI threshold set to 700 (nuclei dataset, lower library complexity than whole-cell datasets).
+
+```{r}
+gen_barcodes_post_ed  <- list()
+gen_filtered_matrices <- list()
+
+for (i in seq_along(gen_count_matrices)) {
+  set.seed(100)
+
+  ed <- as.data.frame(DropletUtils::emptyDrops(
+    m = gen_count_matrices[[i]], lower = 700
+  ))
+  ed <- ed[!is.na(ed$FDR), ]
+
+  gen_barcodes_post_ed[[i]] <- rownames(ed[ed$FDR <= 0.05, ])
+  names(gen_barcodes_post_ed)[i] <- gen_samples[i]
+
+  saveRDS(gen_barcodes_post_ed[[i]], here::here(paste0(
+    "data/processed/genotype/emptyDrops_filtered/rds-files/",
+    gen_samples[i], "_barcodes_post_emptyDrops.Rds"
+  )))
+
+  mat <- gen_count_matrices[[i]]
+  mat <- mat[, colnames(mat) %in% gen_barcodes_post_ed[[i]]]
+  mat <- mat[rowSums(mat) > 0, ]
+  gen_filtered_matrices[[i]] <- mat
+
+  write10xCounts(
+    here::here(paste0(
+      "data/processed/genotype/emptyDrops_filtered/h5-files/",
+      gen_samples[i], "_post_emptyDrops.h5"
+    )),
+    mat,
+    barcodes = colnames(mat),
+    gene.id = rownames(mat),
+    gene.symbol = rownames(mat),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Single Cell 3' v2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+
+  message("Done: ", gen_samples[i])
+}
+
+saveRDS(gen_barcodes_post_ed, file = here::here("data/processed/genotype/emptyDrops_filtered/rds-files/genotype_barcodes_post_ed.Rds"))
+```
+
+## Smart-seq2
+
+emptyDrops is not applicable to plate-based data. Cells are filtered using fixed thresholds for total counts and detected features, chosen by inspecting violin plots per sample.
+
+```{r}
+# Filtering thresholds (set after visual inspection)
+min_counts <- 100000
+max_counts <- 500000
+min_features <- 2500
+max_features <- 10500
+
+smart_barcodes_post_filtering <- list()
+smart_filtered_matrices <- list()
+
+for (i in seq_along(smart_count_matrices)) {
+  total_counts <- Matrix::colSums(smart_count_matrices[[i]])
+  detected_features <- Matrix::colSums(smart_count_matrices[[i]] > 0)
+
+  keep_cells <- (total_counts >= min_counts) &
+                (total_counts <= max_counts) &
+                (detected_features >= min_features) &
+                (detected_features <= max_features)
+
+  smart_barcodes_post_filtering[[i]] <- colnames(smart_count_matrices[[i]])[keep_cells]
+  names(smart_barcodes_post_filtering)[i] <- names(smart_count_matrices)[i]
+
+  saveRDS(smart_barcodes_post_filtering[[i]], here::here(paste0(
+    "data/processed/smart-seq2/filtered/rds-files/",
+    names(smart_count_matrices)[i], "_barcodes_post_filtering.Rds"
+  )))
+
+  mat <- smart_count_matrices[[i]][, keep_cells]
+  mat <- mat[rowSums(mat) > 0, ]
+  smart_filtered_matrices[[i]] <- mat
+
+  write10xCounts(
+    here::here(paste0(
+      "data/processed/smart-seq2/filtered/h5-files/",
+      names(smart_count_matrices)[i], "_post_filtering.h5"
+    )),
+    mat,
+    barcodes = colnames(mat),
+    gene.id = rownames(mat),
+    gene.symbol = rownames(mat),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Smart-seq2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+
+  message("Done: ", names(smart_count_matrices)[i])
+}
+
+saveRDS(smart_barcodes_post_filtering, file = here::here("data/processed/smart-seq2/filtered/rds-files/smart_barcodes_post_filtering.Rds"))
+```

@@ -1,0 +1,275 @@
+---
+title: "06_further_preprocessing"
+format: pdf
+editor: visual
+---
+
+Post-decontamination preprocessing: feature name correction, mitochondrial filtering, metadata addition, species-of-origin labelling, dimensionality reduction, and clustering.
+
+------------------------------------------------------------------------
+
+# Load Seurat objects
+
+```{r}
+lc_seu <- readRDS(here::here("data/processed/low_complexity/seurat_object/lc_seu_before_processing.Rds"))
+mc_human_seu <- readRDS(here::here("data/processed/medium_complexity/seurat_object/mc_human_seu_before_processing.Rds"))
+mc_mouse_seu <- readRDS(here::here("data/processed/medium_complexity/seurat_object/mc_mouse_seu_before_processing.Rds"))
+hc_seu <- readRDS(here::here("data/processed/high_complexity/seurat_object/hc_seu_before_processing.Rds"))
+gen_seu <- readRDS(here::here("data/processed/genotype/seurat_object/gen_seu_before_processing.Rds"))
+smart_seu <- readRDS(here::here("data/processed/smart-seq2/seurat_object/smart_seu_before_processing.Rds"))
+synt_seu <- readRDS(here::here("data/processed/synthetic/seurat_object/synt_seu_before_processing.Rds"))
+synt_seu_wo_ambient <- readRDS(here::here("data/processed/synthetic/seurat_object/synt_seu_wo_ambient_before_processing.Rds"))
+```
+
+------------------------------------------------------------------------
+
+# Correct feature names
+
+Standardises gene name formatting across all assays. Not needed for the genotype dataset (names are already consistent).
+
+```{r}
+lc_seu <- correct_rownames(lc_seu)
+mc_human_seu <- correct_rownames(mc_human_seu)
+mc_mouse_seu <- correct_rownames(mc_mouse_seu)
+hc_seu <- correct_rownames(hc_seu)
+```
+
+### Synthetic — convert Ensembl IDs to gene symbols
+
+The synthetic dataset uses Ensembl IDs as feature names. These are converted to HGNC gene symbols using a local annotation database (org.Hs.eg.db) to avoid network-dependent BioMart queries.
+
+```{r}
+synt_seu <- convert_ensembl_ids_to_gene_names(synt_seu)
+synt_seu_wo_ambient <- convert_ensembl_ids_to_gene_names(synt_seu_wo_ambient)
+```
+
+After conversion, rownames across all assays are synchronised to match the RNA assay. This is required because Ensembl-to-symbol mapping may produce different results for each assay if applied independently.
+
+```{r}
+# Synchronise rownames of all non-RNA assays to the RNA assay
+for (seu_obj in c("synt_seu", "synt_seu_wo_ambient")) {
+  obj <- get(seu_obj)
+  assays <- names(obj@assays)
+  for (assay in assays[-1]) {
+    counts <- GetAssayData(obj, assay = assay, layer = "counts")
+    rownames(counts) <- rownames(obj@assays$RNA)
+    obj[[assay]] <- CreateAssayObject(counts = counts)
+  }
+  assign(seu_obj, obj)
+}
+rm(obj, counts)
+```
+
+------------------------------------------------------------------------
+
+# Remove cells with high mitochondrial content
+
+Thresholds were chosen per dataset after visual inspection of violin plots.
+
+| Dataset           | MT pattern            | Threshold |
+|-------------------|-----------------------|-----------|
+| Low complexity    | mm10-mt- / GRCh38-MT- | 15 %      |
+| Medium complexity | mm10-mt- / GRCh38-MT- | 15 %      |
+| High complexity   | mm10-mt- / GRCh38-MT- | 1 %       |
+| Genotype          | mt-                   | 60 %      |
+| Smart-seq2        | MT-                   | 6 %       |
+| Synthetic         | MT-                   | 10 %      |
+
+```{r}
+lc_seu <- remove_mito_genes(lc_seu, mito_pattern = c("mm10-mt-", "GRCh38-MT-"), mt_threshold = 0.15)
+mc_human_seu <- remove_mito_genes(mc_human_seu, mito_pattern = c("mm10-mt-", "GRCh38-MT-"), mt_threshold = 0.15)
+mc_mouse_seu <- remove_mito_genes(mc_mouse_seu, mito_pattern = c("mm10-mt-", "GRCh38-MT-"), mt_threshold = 0.15)
+hc_seu <- remove_mito_genes(hc_seu, mito_pattern = c("mm10-mt-", "GRCh38-MT-"), mt_threshold = 0.01)
+gen_seu <- remove_mito_genes(gen_seu, mito_pattern = "mt-",                        mt_threshold = 0.60)
+smart_seu <- remove_mito_genes(smart_seu, mito_pattern = "MT-",                        mt_threshold = 0.06)
+synt_seu <- remove_mito_genes(synt_seu, mito_pattern = "MT-",                        mt_threshold = 0.10)
+synt_seu_wo_ambient <- remove_mito_genes(synt_seu_wo_ambient, mito_pattern = "MT-", mt_threshold = 0.10)
+```
+
+------------------------------------------------------------------------
+
+# Add metadata
+
+Only needed for the genotype and synthetic datasets.
+
+## Genotype
+
+```{r}
+cell_metadata <- readRDS(here::here("data/processed/genotype/metadata/cell_metadata.RDS"))
+cell_metadata$barcodes <- paste(cell_metadata$cell, cell_metadata$replicate, sep = "_")
+rownames(cell_metadata) <- cell_metadata$barcodes
+cell_metadata[, c("replicate", "cell", "barcodes")] <- NULL
+
+gen_seu <- AddMetaData(gen_seu, metadata = cell_metadata)
+```
+
+## Synthetic
+
+```{r}
+synt_metadata <- readRDS(here::here("data/raw/synthetic/metadata/synt_metadata.Rds"))
+synt_seu <- AddMetaData(synt_seu, metadata = synt_metadata)
+
+# For the ambient-free object, only the celltype column is needed
+labels <- synt_metadata[match(colnames(synt_seu_wo_ambient), rownames(synt_metadata)), ]
+synt_seu_wo_ambient$celltype <- labels$celltype
+```
+
+------------------------------------------------------------------------
+
+# Label cells by species of origin
+
+Adds an `origin` metadata column (human / mouse) based on the ratio of species-specific UMIs. Only needed for the barnyard and species-mixing datasets.
+
+```{r}
+lc_seu <- determine_species_origin(lc_seu)
+mc_human_seu <- determine_species_origin(mc_human_seu)
+mc_mouse_seu <- determine_species_origin(mc_mouse_seu)
+hc_seu <- determine_species_origin(hc_seu)
+```
+
+------------------------------------------------------------------------
+
+# Dimensionality reduction and clustering
+
+Parameters were chosen interactively from clustree and UMAP visualisations and are stored in `seu@misc` for reference.
+
+## Low complexity
+
+Resolution yields the two true clusters (human and mouse cell lines).
+
+```{r}
+lc_seu <- NormalizeData(lc_seu, verbose = FALSE)
+lc_seu <- FindVariableFeatures(lc_seu, verbose = FALSE)
+lc_seu <- ScaleData(lc_seu, verbose = FALSE)
+lc_seu <- RunPCA(lc_seu, verbose = FALSE)
+lc_seu <- RunUMAP(lc_seu, dims = 1:10, verbose = FALSE)
+lc_seu <- FindNeighbors(lc_seu, dims = 1:10, verbose = FALSE)
+lc_seu <- FindClusters(lc_seu, resolution = 0.03, verbose = FALSE)
+
+lc_seu@misc$dims_used_further_preprocessing <- 10
+lc_seu@misc$res_used_further_preprocessing  <- 0.03
+```
+
+## Medium complexity — human samples
+
+Harmony integration for batch correction across donors.
+
+```{r}
+mc_human_seu <- NormalizeData(mc_human_seu, verbose = FALSE)
+mc_human_seu <- FindVariableFeatures(mc_human_seu, verbose = FALSE)
+mc_human_seu <- ScaleData(mc_human_seu, verbose = FALSE)
+mc_human_seu <- RunPCA(mc_human_seu, verbose = FALSE)
+mc_human_seu <- RunHarmony(mc_human_seu, group.by.vars = "orig.ident", verbose = FALSE)
+mc_human_seu <- RunUMAP(mc_human_seu, dims = 1:12, reduction = "harmony", verbose = FALSE)
+mc_human_seu <- FindNeighbors(mc_human_seu, dims = 1:12, reduction = "harmony", verbose = FALSE)
+mc_human_seu <- FindClusters(mc_human_seu, resolution = 0.2, verbose = FALSE)
+
+mc_human_seu@misc$dims_used_further_preprocessing <- 12
+mc_human_seu@misc$res_used_further_preprocessing <- 0.2
+```
+
+## Medium complexity — mouse samples
+
+```{r}
+mc_mouse_seu <- NormalizeData(mc_mouse_seu, verbose = FALSE)
+mc_mouse_seu <- FindVariableFeatures(mc_mouse_seu, verbose = FALSE)
+mc_mouse_seu <- ScaleData(mc_mouse_seu, verbose = FALSE)
+mc_mouse_seu <- RunPCA(mc_mouse_seu, verbose = FALSE)
+mc_mouse_seu <- RunHarmony(mc_mouse_seu, group.by.vars = "orig.ident", verbose = FALSE)
+mc_mouse_seu <- RunUMAP(mc_mouse_seu, dims = 1:10, reduction = "harmony", verbose = FALSE)
+mc_mouse_seu <- FindNeighbors(mc_mouse_seu, dims = 1:10, reduction = "harmony", verbose = FALSE)
+mc_mouse_seu <- FindClusters(mc_mouse_seu, resolution = 0.2, verbose = FALSE)
+
+mc_mouse_seu@misc$dims_used_further_preprocessing <- 10
+mc_mouse_seu@misc$res_used_further_preprocessing <- 0.2
+```
+
+## High complexity
+
+```{r}
+hc_seu <- NormalizeData(hc_seu, verbose = FALSE)
+hc_seu <- FindVariableFeatures(hc_seu, verbose = FALSE)
+hc_seu <- ScaleData(hc_seu, verbose = FALSE)
+hc_seu <- RunPCA(hc_seu, verbose = FALSE)
+hc_seu <- RunUMAP(hc_seu, dims = 1:15, verbose = FALSE)
+hc_seu <- FindNeighbors(hc_seu, dims = 1:15, verbose = FALSE)
+hc_seu <- FindClusters(hc_seu, resolution = 0.4, verbose = FALSE)
+
+hc_seu@misc$dims_used_further_preprocessing <- 15
+hc_seu@misc$res_used_further_preprocessing <- 0.4
+```
+
+## Genotype
+
+```{r}
+gen_seu <- NormalizeData(gen_seu, verbose = FALSE)
+gen_seu <- FindVariableFeatures(gen_seu, verbose = FALSE)
+gen_seu <- ScaleData(gen_seu, verbose = FALSE)
+gen_seu <- RunPCA(gen_seu, verbose = FALSE)
+gen_seu <- RunUMAP(gen_seu, dims = 1:15, verbose = FALSE)
+gen_seu <- FindNeighbors(gen_seu, dims = 1:15, verbose = FALSE)
+gen_seu <- FindClusters(gen_seu, resolution = 0.15, verbose = FALSE)
+
+gen_seu@misc$dims_used_further_preprocessing <- 15
+gen_seu@misc$res_used_further_preprocessing <- 0.15
+```
+
+## Smart-seq2
+
+```{r}
+smart_seu <- NormalizeData(smart_seu, verbose = FALSE)
+smart_seu <- FindVariableFeatures(smart_seu, verbose = FALSE)
+smart_seu <- ScaleData(smart_seu, verbose = FALSE)
+smart_seu <- RunPCA(smart_seu, verbose = FALSE)
+smart_seu <- RunUMAP(smart_seu, dims = 1:10, verbose = FALSE)
+smart_seu <- FindNeighbors(smart_seu, dims = 1:10, verbose = FALSE)
+smart_seu <- FindClusters(smart_seu, resolution = 0.5, verbose = FALSE)
+
+smart_seu@misc$dims_used_further_preprocessing <- 10
+smart_seu@misc$res_used_further_preprocessing <- 0.5
+```
+
+## Synthetic — with ambient RNA
+
+```{r}
+synt_seu <- NormalizeData(synt_seu, verbose = FALSE)
+synt_seu <- FindVariableFeatures(synt_seu, verbose = FALSE)
+synt_seu <- ScaleData(synt_seu, verbose = FALSE)
+synt_seu <- RunPCA(synt_seu, verbose = FALSE)
+synt_seu <- RunUMAP(synt_seu, dims = 1:4, verbose = FALSE)
+synt_seu <- FindNeighbors(synt_seu, dims = 1:4, verbose = FALSE)
+synt_seu <- FindClusters(synt_seu, resolution = 0.05, verbose = FALSE)
+
+synt_seu@misc$dims_used_further_preprocessing <- 4
+synt_seu@misc$res_used_further_preprocessing <- 0.05
+```
+
+## Synthetic — without ambient RNA
+
+```{r}
+synt_seu_wo_ambient <- NormalizeData(synt_seu_wo_ambient, verbose = FALSE)
+synt_seu_wo_ambient <- FindVariableFeatures(synt_seu_wo_ambient, verbose = FALSE)
+synt_seu_wo_ambient <- ScaleData(synt_seu_wo_ambient, verbose = FALSE)
+synt_seu_wo_ambient <- RunPCA(synt_seu_wo_ambient, verbose = FALSE)
+synt_seu_wo_ambient <- RunUMAP(synt_seu_wo_ambient, dims = 1:4, verbose = FALSE)
+synt_seu_wo_ambient <- FindNeighbors(synt_seu_wo_ambient, dims = 1:4, verbose = FALSE)
+synt_seu_wo_ambient <- FindClusters(synt_seu_wo_ambient, resolution = 0.03, verbose = FALSE)
+
+synt_seu_wo_ambient@misc$dims_used_further_preprocessing <- 4
+synt_seu_wo_ambient@misc$res_used_further_preprocessing <- 0.03
+```
+
+------------------------------------------------------------------------
+
+# Save final Seurat objects
+
+```{r}
+saveRDS(lc_seu, here::here("data/processed/low_complexity/seurat_object/lc_seu.Rds"))
+saveRDS(mc_human_seu, here::here("data/processed/medium_complexity/seurat_object/mc_human_seu.Rds"))
+saveRDS(mc_mouse_seu, here::here("data/processed/medium_complexity/seurat_object/mc_mouse_seu.Rds"))
+saveRDS(hc_seu, here::here("data/processed/high_complexity/seurat_object/hc_seu.Rds"))
+saveRDS(gen_seu, here::here("data/processed/genotype/seurat_object/gen_seu.Rds"))
+saveRDS(smart_seu, here::here("data/processed/smart-seq2/seurat_object/smart_seu.Rds"))
+saveRDS(synt_seu, here::here("data/processed/synthetic/seurat_object/synt_seu.Rds"))
+saveRDS(synt_seu_wo_ambient, here::here("data/processed/synthetic/seurat_object/synt_seu_wo_ambient.Rds"))
+```

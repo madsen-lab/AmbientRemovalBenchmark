@@ -1,0 +1,47 @@
+.Rproj.user
+.Rprofile
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+*.pdf
+*.png
+*.jpg
+
+# Python version manager
+.python-version
+
+# Vim swap files
+*.swp
+*.swo
+*~
+
+# Large data files
+dependencies/r_packages/
+results/
+tmp/
+data/
+*.fastq
+*.fastq.gz
+*.bam
+*.bai
+*.h5
+*.h5ad
+*.Rds
+*.rds
+*.mtx
+*.mtx.gz
+*.tsv.gz
+
+# STARsolo output
+*Solo.out/
+*_STARsolo_Alignment/
+
+# R session artifacts
+.Rhistory
+.RData
+.Rproj.user/
+
+# Quarto build output (GitHub Actions handles this)
+_site/
+.quarto/

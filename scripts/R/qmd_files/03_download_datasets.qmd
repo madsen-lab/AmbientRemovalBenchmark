@@ -1,0 +1,609 @@
+---
+title: "03_download_datasets"
+format: pdf
+editor: visual
+---
+
+All datasets were retrieved through the terminal in JupyterLab 4.3.1. The bash commands below are reproduced here for transparency. The full download script is also available at `scripts/bash/download_datasets.sh`.
+
+Synthetic datasets are simulated in R from the cell-line data retrieved by the bash script.
+
+All datasets are post retrieval loaded into R and saved as count matrices in data/raw/\*/count_matrices/ .
+
+------------------------------------------------------------------------
+
+# Setup vectors of all sample names for all datasets
+
+```{r}
+mc_human_samples <- c("SRR10751483", "SRR10751484", "SRR10751485", "SRR10751486", "SRR10751487", "SRR10751488", "SRR10751489", "SRR10751490", "SRR10751491", "SRR10751492", "SRR10751493", "SRR10751494", "SRR10751495", "SRR10751496", "SRR10751497", "SRR10751498", "SRR10751499", "SRR10751500", "SRR10751501")
+mc_mouse_samples <- c("SRR10751502", "SRR10751503", "SRR10751504", "SRR10751505", "SRR10751506", "SRR10751507", "SRR10751508", "SRR10751509", "SRR10751510", "SRR10751511", "SRR10751512", "SRR10751513", "SRR10751514", "SRR10751515", "SRR10751516")
+hc_samples <- c("SRR19962919", "SRR19962920", "SRR19962921", "SRR19962922", "SRR19962923", "SRR19962924", "SRR19962925", "SRR19962926", "SRR19962927", "SRR19962928", "SRR19962929", "SRR19962930", "SRR19962931", "SRR19962932", "SRR19962933", "SRR19962934")
+gen_samples <- c("nuc2", "nuc3", "rep1", "rep2", "rep3")
+smart_samples <- c("HP1506401", "HP1507101", "HP1508501T2D")
+synt_samples <- c("sample1", "sample2", "sample3", "sample4", "sample5", "sample6")
+synt_wo_ambient_samples <- c("sample1_wo_ambient", "sample2_wo_ambient", "sample3_wo_ambient", "sample4_wo_ambient", "sample5_wo_ambient", "sample6_wo_ambient")
+```
+
+------------------------------------------------------------------------
+
+# Low complexity
+
+A pre-processed 10x Genomics barnyard dataset (1:1 mix of human 293T and mouse 3T3 cells). Details: <https://cf.10xgenomics.com/samples/cell-exp/6.1.0/20k_hgmm_3p_HT_nextgem_Chromium_X/20k_hgmm_3p_HT_nextgem_Chromium_X_web_summary.html>
+
+```{bash}
+#| eval: false
+cd data/raw/low_complexity/raw_feature_bc_matrix/
+
+wget https://cf.10xgenomics.com/samples/cell-exp/6.1.0/20k_hgmm_3p_HT_nextgem_Chromium_X/20k_hgmm_3p_HT_nextgem_Chromium_X_raw_feature_bc_matrix.h5
+```
+
+------------------------------------------------------------------------
+
+# Medium complexity
+
+Article DOI: 10.1186/s13059-020-02006-2 \| GEO accession: GSE147203
+
+Human islets of Langerhans spiked with a mix of human Jurkat and mouse 32D cells.
+
+**Human samples** (19 samples, SRR10751483–SRR10751501)\
+**Mouse samples** (15 samples, SRR10751502–SRR10751516)
+
+Some SRA files contain three reads (technical read 8 nt, Read1 76 nt, Read2 98 nt); others contain only Read1 and Read2. The script handles both cases.
+
+```{bash}
+#| eval: false
+cd data/raw/medium_complexity
+
+for ((i=483; i<=518; i++)); do
+  SRR="SRR10751${i}"
+
+  # Download and convert to FASTQ
+  prefetch --max-size 500g --progress "$SRR"
+  fasterq-dump "$SRR" --split-files --include-technical -e 30 \
+    -O "data/raw/medium_complexity/${SRR}"
+  rm "data/raw/medium_complexity/${SRR}/${SRR}.sra"
+
+  # Choose read files based on whether a third technical read is present
+  if [ -f "data/raw/medium_complexity/${SRR}/${SRR}_3.fastq" ]; then
+    READ1="${SRR}_3.fastq"   # technical read (CB+UMI)
+    READ2="${SRR}_2.fastq"   # cDNA read
+  else
+    READ1="${SRR}_2.fastq"
+    READ2="${SRR}_1.fastq"
+  fi
+
+  # Align with STARsolo
+  STAR \
+    --genomeDir data/raw/reference_sources/GRCh38-and-mm10-2020-A-10X-Download/star/ \
+    --readFilesIn "data/raw/medium_complexity/${SRR}/${READ1}" \
+                  "data/raw/medium_complexity/${SRR}/${READ2}" \
+    --soloType CB_UMI_Simple \
+    --soloCBwhitelist data/raw/reference_sources/STAR-Solo-Whitelists/737K-august-2016.txt \
+    --soloCBstart 1 --soloCBlen 16 --soloUMIstart 17 \
+    --soloBarcodeReadLength 0 --soloUMIlen 10 \
+    --soloCellFilter None \
+    --soloUMIdedup 1MM_CR \
+    --soloFeatures Gene GeneFull GeneFull_Ex50pAS GeneFull_ExonOverIntron \
+    --outFileNamePrefix "${SRR}_STARsolo_Alignment/${SRR}_" \
+    --runThreadN 60
+
+  # Clean up large intermediate files
+  rm -r "data/raw/medium_complexity/${SRR}"
+  rm "${SRR}_STARsolo_Alignment/${SRR}_Aligned.out.sam"
+done
+```
+
+------------------------------------------------------------------------
+
+# High complexity
+
+Article DOI: 10.1172/jci.insight.153877 \| GEO accession: GSE207393
+
+Human islets of Langerhans xenografted into murine kidneys. All 16 runs (SRR19962919–SRR19962934) are used. Based on fastp quality assessment, 31 nucleotides are trimmed from the 5′ end of Read 2 prior to alignment.
+
+```{bash}
+#| eval: false
+cd data/raw/high_complexity
+
+for ((i=19; i<=34; i++)); do
+  SRR="SRR199629${i}"
+
+  # Download and convert to FASTQ
+  prefetch --max-size 500g --progress "$SRR"
+  fasterq-dump "$SRR" --split-files --include-technical -e 30 \
+    -O "data/raw/high_complexity/${SRR}"
+  rm "data/raw/high_complexity/${SRR}/${SRR}.sra"
+
+  # Trim 31 nt from the 5′ end of Read 2 (identified via fastp)
+  cutadapt -u 31 \
+    -o "data/raw/high_complexity/${SRR}/${SRR}_3_trimmed.fastq" \
+       "data/raw/high_complexity/${SRR}/${SRR}_3.fastq" \
+    --cores 60
+  rm "data/raw/high_complexity/${SRR}/${SRR}_3.fastq"
+
+  # Align with STARsolo
+  STAR \
+    --genomeDir data/raw/reference_sources/GRCh38-and-mm10-2020-A-10X-Download/star/ \
+    --readFilesIn "data/raw/high_complexity/${SRR}/${SRR}_3_trimmed.fastq" \
+                  "data/raw/high_complexity/${SRR}/${SRR}_2.fastq" \
+    --soloType CB_UMI_Simple \
+    --soloCBwhitelist data/raw/reference_sources/STAR-Solo-Whitelists/737K-august-2016.txt \
+    --soloCBstart 1 --soloCBlen 16 --soloUMIstart 17 \
+    --soloBarcodeReadLength 0 --soloUMIlen 10 \
+    --soloCellFilter None \
+    --soloUMIdedup 1MM_CR \
+    --soloFeatures Gene GeneFull GeneFull_Ex50pAS GeneFull_ExonOverIntron \
+    --outFileNamePrefix "${SRR}_STARsolo_Alignment/${SRR}_" \
+    --runThreadN 60
+
+  # Clean up
+  rm -r "data/raw/high_complexity/${SRR}"
+  rm "${SRR}_STARsolo_Alignment/${SRR}_Aligned.out.sam"
+done
+```
+
+------------------------------------------------------------------------
+
+# Genotype (strain-mixing)
+
+Article DOI: 10.1186/s13059-023-02978-x \| GEO accession: GSE218853
+
+Kidney cells from three inbred mouse strains. Pre-processed H5 files are downloaded directly from GEO for all five samples (GSM6757771–GSM6757775).
+
+```{bash}
+#| eval: false
+cd data/raw/genotype/h5-files
+
+# rep1 (GSM6757771)
+wget --content-disposition \
+  "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSM6757771&format=file&file=GSM6757771%5Frep1%5Fraw%5Ffeature%5Fbc%5Fmatrix%2Eh5"
+
+# rep2 (GSM6757772)
+wget --content-disposition \
+  "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSM6757772&format=file&file=GSM6757772%5Frep2%5Fraw%5Ffeature%5Fbc%5Fmatrix%2Eh5"
+
+# rep3 (GSM6757773)
+wget --content-disposition \
+  "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSM6757773&format=file&file=GSM6757773%5Frep3%5Fraw%5Ffeature%5Fbc%5Fmatrix%2Eh5"
+
+# nuc2 (GSM6757774)
+wget --content-disposition \
+  "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSM6757774&format=file&file=GSM6757774%5Fnuc2%5Fraw%5Ffeature%5Fbc%5Fmatrix%2Eh5"
+
+# nuc3 (GSM6757775)
+wget --content-disposition \
+  "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSM6757775&format=file&file=GSM6757775%5Fnuc3%5Fraw%5Ffeature%5Fbc%5Fmatrix%2Eh5"
+```
+
+The genotype dataset also requires an exon annotation BED file for the exon-fraction analysis (used in `07_analysis_and_figures.qmd`). This is built from the reference GTF:
+
+```{bash}
+#| eval: false
+# Extract exon entries from the GRCm39 reference GTF
+zcat data/raw/reference_sources/refdata-gex-GRCm39-2024-A/genes/genes.gtf.gz \
+  | awk '$3 == "exon"' > data/raw/reference_sources/refdata-gex-GRCm39-2024-A/genes/exons.gtf
+```
+
+------------------------------------------------------------------------
+
+# Smart-seq2
+
+ArrayExpress accession: E-MTAB-5061. Plate-based scRNA-seq from human islets of Langerhans.
+
+```{bash}
+#| eval: false
+cd data/raw/smart-seq2
+
+wget -O "pancreas_refseq_rpkms_counts_3514sc.txt" \
+  "https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/061/E-MTAB-5061/Files/pancreas_refseq_rpkms_counts_3514sc.txt"
+```
+
+------------------------------------------------------------------------
+
+# Synthetic dataset
+
+Article DOI: 10.1038/s41467-022-29358-6 \| GEO accession: GSE173634
+
+Three cell lines (MCF12A, HCC1500, HS578T) are used for simulation. The alignment below uses a 12-nt CB + 8-nt UMI chemistry.
+
+```{bash}
+#| eval: false
+# Example for HCC1500 (same command structure for MCF12A and HS578T)
+STAR \
+  --genomeDir STARindex/ \
+  --readFilesIn HCC1500_SRR14369363_2.fastq.gz HCC1500_SRR14369363_1.fastq.gz \
+  --soloCBstart 1 --soloCBlen 12 --soloUMIstart 13 --soloUMIlen 8 \
+  --soloType CB_UMI_Simple \
+  --soloCBwhitelist None \
+  --outSAMtype BAM SortedByCoordinate \
+  --outSAMattributes NH HI nM AS CR UR CB UB \
+  --readFilesCommand zcat \
+  --runThreadN 30 \
+  --soloCellFilter None \
+  --soloUMIdedup 1MM_CR \
+  --soloUMIfiltering MultiGeneUMI_CR \
+  --outFileNamePrefix HCC1500
+```
+
+## Filter and fit cell-line data
+
+```{r}
+MCF12A <- filter_dataset(
+  here::here("data/raw/synthetic/cell_lines/MCF12ASolo.out/Gene/raw/"),
+  min_umis = 1000,
+  min_genes = 10,
+  max_mt_frac = 0.1
+)
+HCC1500 <- filter_dataset(
+  here::here("data/raw/synthetic/cell_lines/HCC1500Solo.out/Gene/raw/"),
+  min_umis = 1000,
+  min_genes = 10,
+  max_mt_frac = 0.1
+)
+HS578T <- filter_dataset(
+  here::here("data/raw/synthetic/cell_lines/HS578TSolo.out/Gene/raw/"),
+  min_umis = 1000,
+  min_genes = 10,
+  max_mt_frac = 0.1
+)
+```
+
+```{r}
+# Fit negative binomial distributions to each cell line
+MCF12A_params <- fit_models(MCF12A)
+HCC1500_params <- fit_models(HCC1500)
+HS578T_params <- fit_models(HS578T)
+```
+
+## Simulate samples
+
+Six samples are generated with ambient fractions drawn from normal distributions (means 0.2, 0.4, 0.6; SDs 0.1, 0.2, 0.3), with and without a cell-type mixing fraction (1:2:5 ratio).
+
+```{r}
+param_list <- list(
+  MCF12A = MCF12A_params,
+  HCC1500 = HCC1500_params,
+  HS578T = HS578T_params
+)
+sizes <- get_real_sizes(
+  here::here("data/raw/synthetic/cell_lines/HS578TSolo.out/Gene/raw/")
+)
+```
+
+```{r}
+# Simulation parameters (index matches synt_samples 1–6)
+ambient_means <- c(0.2, 0.4, 0.6, 0.2, 0.4, 0.6)
+ambient_sds <- c(0.1, 0.2, 0.3, 0.1, 0.2, 0.3)
+mix_fractions <- list(NULL, NULL, NULL, c(1, 2, 5), c(1, 2, 5), c(1, 2, 5))
+
+for (sample in seq_along(synt_samples)) {
+  ambient <- generate_dataset(
+    param_list = param_list,
+    sizes = sizes,
+    mix_fraction = mix_fractions[[sample]],
+    ambient_mean = ambient_means[sample],
+    ambient_sd = ambient_sds[sample]
+  )
+  saveRDS(
+    ambient,
+    here::here(paste0(
+      "data/raw/synthetic/dataset_R_objects_full/", synt_samples[sample], ".Rds"
+    ))
+  )
+}
+```
+
+------------------------------------------------------------------------
+
+# Create output directory structure
+
+```{r}
+main_dir <- here::here()   # project root (set by here package)
+
+# Raw count matrices
+dir.create(file.path(main_dir, "data/raw/low_complexity/count_matrix"),        recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/raw/medium_complexity/count_matrices"),   recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/raw/high_complexity/count_matrices"),     recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/raw/genotype/count_matrices"),            recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/raw/smart-seq2/count_matrices"),          recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/raw/synthetic/count_matrices"),           recursive = TRUE, showWarnings = FALSE)
+
+# H5 files for Python-based methods
+# Note: low complexity and genotype H5 files are the downloaded files themselves
+dir.create(file.path(main_dir, "data/raw/medium_complexity/h5-files"),         recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/raw/high_complexity/h5-files"),           recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(main_dir, "data/raw/synthetic/h5-files"),                 recursive = TRUE, showWarnings = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# Load and save count matrices
+
+## Low complexity
+
+```{r}
+lc_count_matrix <- Read10X_h5(here::here(
+  "data/raw/low_complexity/h5-file/20k_hgmm_3p_HT_nextgem_Chromium_X_raw_feature_bc_matrix.h5"
+))
+
+saveRDS(lc_count_matrix,
+        file = here::here("data/raw/low_complexity/count_matrix/lc_count_matrix.Rds"))
+```
+
+## Medium complexity
+
+### Human samples
+
+```{r}
+mc_human_count_matrices <- list()
+for (SRR_sample in mc_human_samples) {
+  mc_human_count_matrices[[SRR_sample]] <- load_folder(here::here(paste0(
+    "data/raw/medium_complexity/", SRR_sample,
+    "_STARsolo_Alignment/", SRR_sample, "_Solo.out/GeneFull_Ex50pAS/raw"
+  )))
+}
+
+saveRDS(mc_human_count_matrices,
+        file = here::here("data/raw/medium_complexity/count_matrices/mc_human_count_matrices.Rds"))
+
+# Save H5 files for Python-based methods
+for (i in seq_along(mc_human_count_matrices)) {
+  write10xCounts(
+    here::here(paste0("data/raw/medium_complexity/h5-files/", mc_human_samples[i], ".h5")),
+    mc_human_count_matrices[[i]],
+    barcodes = colnames(mc_human_count_matrices[[i]]),
+    gene.id = rownames(mc_human_count_matrices[[i]]),
+    gene.symbol = rownames(mc_human_count_matrices[[i]]),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Single Cell 3' v2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+}
+```
+
+### Mouse samples
+
+```{r}
+mc_mouse_count_matrices <- list()
+for (SRR_sample in mc_mouse_samples) {
+  mc_mouse_count_matrices[[SRR_sample]] <- load_folder(here::here(paste0(
+    "data/raw/medium_complexity/", SRR_sample,
+    "_STARsolo_Alignment/", SRR_sample, "_Solo.out/GeneFull_Ex50pAS/raw"
+  )))
+}
+
+saveRDS(mc_mouse_count_matrices,
+        file = here::here("data/raw/medium_complexity/count_matrices/mc_mouse_count_matrices.Rds"))
+
+for (i in seq_along(mc_mouse_count_matrices)) {
+  write10xCounts(
+    here::here(paste0("data/raw/medium_complexity/h5-files/", mc_mouse_samples[i], ".h5")),
+    mc_mouse_count_matrices[[i]],
+    barcodes = colnames(mc_mouse_count_matrices[[i]]),
+    gene.id = rownames(mc_mouse_count_matrices[[i]]),
+    gene.symbol = rownames(mc_mouse_count_matrices[[i]]),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Single Cell 3' v2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+}
+```
+
+## High complexity
+
+```{r}
+hc_count_matrices <- list()
+for (SRR_sample in hc_samples) {
+  hc_count_matrices[[SRR_sample]] <- load_folder(here::here(paste0(
+    "data/raw/high_complexity/", SRR_sample,
+    "_STARsolo_Alignment/", SRR_sample, "_Solo.out/GeneFull_Ex50pAS/raw"
+  )))
+}
+
+saveRDS(hc_count_matrices,
+        file = here::here("data/raw/high_complexity/count_matrices/hc_count_matrices.Rds"))
+
+for (i in seq_along(hc_count_matrices)) {
+  write10xCounts(
+    here::here(paste0("data/raw/high_complexity/h5-files/", hc_samples[i], ".h5")),
+    hc_count_matrices[[i]],
+    barcodes = colnames(hc_count_matrices[[i]]),
+    gene.id = rownames(hc_count_matrices[[i]]),
+    gene.symbol = rownames(hc_count_matrices[[i]]),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Single Cell 3' v2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+}
+```
+
+## Genotype
+
+```{r}
+gen_count_matrices <- list()
+for (SRR_sample in gen_samples) {
+  gen_count_matrices[[SRR_sample]] <- Read10X_h5(here::here(
+    paste0("data/raw/genotype/h5-files/", SRR_sample, "_raw_feature_bc_matrix.h5")
+  ))
+}
+
+saveRDS(gen_count_matrices,
+        file = here::here("data/raw/genotype/count_matrices/gen_count_matrices.Rds"))
+```
+
+## Smart-seq2
+
+Each cell is aligned individually; matrices are loaded per cell and combined into per-sample matrices.
+
+```{r}
+# Load per-cell matrices
+smart_count_matrices_per_cell <- list()
+for (SRR_sample in smart_samples) {
+  smart_count_matrices_per_cell[[SRR_sample]] <- load_folder(here::here(paste0(
+    "data/raw/smart-seq2/Preprocessed/", SRR_sample, "/Solo.out/GeneFull/raw"
+  )))
+}
+
+# Combine into per-donor matrices
+sample_names <- unique(sub("_.*", "", names(smart_count_matrices_per_cell)))
+smart_count_matrices <- list()
+
+for (sample in sample_names) {
+  cells_in_sample <- names(smart_count_matrices_per_cell)[
+    grepl(paste0("^", sample, "_"), names(smart_count_matrices_per_cell))
+  ]
+  smart_count_matrices[[sample]] <- do.call(
+    cbind, smart_count_matrices_per_cell[cells_in_sample]
+  )
+}
+
+# Remove empty rows / columns and deduplicate rownames
+for (i in seq_along(smart_count_matrices)) {
+  mat <- smart_count_matrices[[i]]
+  mat <- mat[rowSums(mat) > 0, colSums(mat) > 0]
+  rownames(mat) <- make.unique(rownames(mat))
+  smart_count_matrices[[i]] <- mat
+}
+
+saveRDS(smart_count_matrices,
+        file = here::here("data/raw/smart-seq2/count_matrices/smart_count_matrices.Rds"))
+
+# Save H5 files for Python-based methods
+for (i in seq_along(smart_count_matrices)) {
+  write10xCounts(
+    here::here(paste0("data/raw/smart-seq2/h5-files/", sample_names[i], ".h5")),
+    smart_count_matrices[[i]],
+    barcodes = colnames(smart_count_matrices[[i]]),
+    gene.id = rownames(smart_count_matrices[[i]]),
+    gene.symbol = rownames(smart_count_matrices[[i]]),
+    gene.type = "Gene Expression",
+    overwrite = TRUE,
+    type = "HDF5",
+    genome = "unknown",
+    version = "3",
+    chemistry = "Smart-seq2",
+    original.gem.groups = 1L,
+    library.ids = "custom"
+  )
+}
+```
+
+## Synthetic
+
+### With ambient RNA
+
+```{r}
+# Load simulated sample objects
+synt_simulations <- list()
+for (sample in synt_samples) {
+  synt_simulations[[sample]] <- readRDS(here::here(paste0(
+    "data/raw/synthetic/dataset_R_objects_full/", sample, ".Rds"
+  )))
+}
+```
+
+```{r}
+# Build count matrices and filtered barcodes
+synt_count_matrices <- create_count_matrices(simulated_samples = synt_simulations)
+synt_filtered_count_matrices <- create_filtered_count_matrices(simulated_samples = synt_simulations)
+synt_filtered_barcodes <- get_filtered_barcodes(filtered_count_matrices = synt_filtered_count_matrices)
+
+# Save RDS
+saveRDS(synt_count_matrices,
+        file = here::here("data/raw/synthetic/count_matrices/synt_count_matrices.Rds"))
+saveRDS(synt_filtered_barcodes,
+        file = here::here("data/processed/synthetic/filtered/rds-files/synt_filtered_barcodes.Rds"))
+
+# Save H5 — raw matrices
+for (i in seq_along(synt_count_matrices)) {
+  write10xCounts(
+    here::here(paste0("data/raw/synthetic/h5-files/", synt_samples[i], ".h5")),
+    synt_count_matrices[[i]],
+    barcodes = colnames(synt_count_matrices[[i]]),
+    gene.id = rownames(synt_count_matrices[[i]]),
+    gene.symbol = rownames(synt_count_matrices[[i]]),
+    gene.type = "Gene Expression",
+    type = "HDF5",
+    overwrite = TRUE,
+    genome = "unknown",
+    version = "3"
+  )
+}
+
+# Save H5 — filtered matrices
+for (i in seq_along(synt_filtered_count_matrices)) {
+  write10xCounts(
+    here::here(paste0("data/processed/synthetic/filtered/h5-files/",
+                      synt_samples[i], "_filtered.h5")),
+    synt_filtered_count_matrices[[i]],
+    barcodes = colnames(synt_filtered_count_matrices[[i]]),
+    gene.id = rownames(synt_filtered_count_matrices[[i]]),
+    gene.symbol = rownames(synt_filtered_count_matrices[[i]]),
+    gene.type = "Gene Expression",
+    type = "HDF5",
+    overwrite = TRUE,
+    genome = "unknown",
+    version = "3"
+  )
+}
+```
+
+### Without ambient RNA
+
+```{r}
+synt_wo_ambient <- create_count_matrices_wo_ambient(simulated_samples = synt_simulations)
+synt_wo_ambient_filtered <- create_filtered_count_matrices_wo_ambient(simulated_samples = synt_simulations)
+synt_wo_ambient_filtered_barcodes <- get_filtered_barcodes(filtered_count_matrices = synt_wo_ambient_filtered)
+
+# Save RDS
+saveRDS(synt_wo_ambient, file = here::here("data/raw/synthetic/count_matrices/synt_count_matrices_wo_ambient.Rds"))
+saveRDS(synt_wo_ambient_filtered_barcodes, file = here::here("data/processed/synthetic/filtered/rds-files/synt_wo_ambient_filtered_barcodes.Rds"))
+
+# Save H5 — raw matrices
+for (i in seq_along(synt_wo_ambient)) {
+  write10xCounts(
+    here::here(paste0("data/raw/synthetic/h5-files/", synt_samples[i], "_wo_ambient.h5")),
+    synt_wo_ambient[[i]],
+    barcodes = colnames(synt_wo_ambient[[i]]),
+    gene.id = rownames(synt_wo_ambient[[i]]),
+    gene.symbol = rownames(synt_wo_ambient[[i]]),
+    gene.type = "Gene Expression",
+    type = "HDF5",
+    overwrite = TRUE,
+    genome = "unknown",
+    version = "3"
+  )
+}
+
+# Save H5 — filtered matrices
+for (i in seq_along(synt_wo_ambient_filtered)) {
+  write10xCounts(
+    here::here(paste0("data/processed/synthetic/filtered/h5-files/",
+    synt_samples[i], "_wo_ambient_filtered.h5")),
+    synt_wo_ambient_filtered[[i]],
+    barcodes = colnames(synt_wo_ambient_filtered[[i]]),
+    gene.id = rownames(synt_wo_ambient_filtered[[i]]),
+    gene.symbol = rownames(synt_wo_ambient_filtered[[i]]),
+    gene.type = "Gene Expression",
+    type = "HDF5",
+    overwrite = TRUE,
+    genome = "unknown",
+    version = "3"
+  )
+}
+```
